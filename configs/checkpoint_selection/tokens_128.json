@@ -1,0 +1,6 @@
+{
+  "checkpoint_selection": {
+    "strategy": "token_interval",
+    "interval": 128
+  }
+}

@@ -56,7 +56,7 @@ def test_count_reasoning_tokens_with_end():
     ids = [10, 11, 12, DEFAULT_THINK_END_TOKEN_ID, 20, 21]
     counts = count_reasoning_tokens(ids)
     assert counts.think_end_index == 3
-    assert counts.reasoning_token_count == 4  # includes think_end
+    assert counts.reasoning_token_count == 3  # excludes think tags
     assert counts.answer_token_count == 2
     assert counts.total_generated_token_count == 6
 
@@ -65,7 +65,7 @@ def test_count_reasoning_tokens_missing_end():
     ids = [10, 11, 12]
     counts = count_reasoning_tokens(ids)
     assert counts.think_end_index == -1
-    assert counts.reasoning_token_count == 3
+    assert counts.reasoning_token_count is None
     assert counts.answer_token_count == 0
 
 

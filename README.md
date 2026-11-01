@@ -89,7 +89,17 @@ pip install -r requirements.txt
 python scripts/run_inference.py --config configs/inference_default.yaml --backend mock
 ```
 
-Outputs are written under `outputs/` as per-sample JSON and a combined JSONL file.
+Outputs are written under `outputs/<run_id>/`: `generations.jsonl` for the
+Dataset team, `results.jsonl` and per-sample JSON for detailed inspection.
+Use `--run-id` to name a run; existing run directories are never reused.
+
+### Dataset team integration
+
+See [integration guide](docs/integration.md) for CPU smoke tests, exact-tokenizer
+checkpoint alignment, the input/output contract, and GPU server setup.
+The imported SQA3D scoring tools are dataset-specific; a replacement spatial
+dataset needs its own answer adapter. Hidden-state extraction and actual
+forced-answer generation are not implemented yet.
 
 ### Unit tests
 

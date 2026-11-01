@@ -38,9 +38,11 @@ class MockRunner:
         answer = f"[mock answer] sample={sample.sample_id}"
         raw_output = f"{reasoning}\n{self.think_end_text}\n\n{answer}"
 
+        if self.config.generation.max_new_tokens < 10:
+            raise ValueError("Mock fixture requires max_new_tokens >= 10")
         # Synthetic IDs: a few placeholder tokens, then think_end, then answer tokens.
-        input_token_ids = [1, 2, 3, 4, 5]
-        output_token_ids = [10, 11, 12, 13, 14, self.think_end_token_id, 20, 21, 22]
+        input_token_ids = [1, 2, 3, 4, 151667]
+        output_token_ids = [10, 11, 12, 13, 14, self.think_end_token_id, 20, 21, 22, 151645]
 
         parsed = split_thinking_and_answer(
             raw_output, think_end_text=self.think_end_text
@@ -59,7 +61,7 @@ class MockRunner:
         return InferenceResult(
             sample_id=sample.sample_id,
             model_name=f"mock::{self.config.model.model_id}",
-            model_revision=self.config.model.revision,
+            model_revision="synthetic-v1",
             dtype=self.config.model.dtype,
             image_path=image_path,
             question=sample.question,
@@ -75,6 +77,14 @@ class MockRunner:
             latency_seconds=latency,
             parse_status=parsed.parse_status,
             backend="mock",
+            prompt_text="[synthetic mock prompt]<think>",
+            tokenizer_name="mock-tokenizer",
+            tokenizer_revision="synthetic-v1",
+            finish_reason="stop",
+            eos_token_ids=[151645],
+            question_id=sample.question_id,
+            split=sample.split,
+            prompt_version=sample.prompt_version,
             metadata={
                 **sample.metadata,
                 "mock": True,

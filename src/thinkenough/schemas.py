@@ -30,6 +30,9 @@ class InferenceSample:
     image_path: str
     question: str
     metadata: dict[str, Any] = field(default_factory=dict)
+    question_id: int | str | None = None
+    split: str = "test"
+    prompt_version: str = "image_question_v1"
 
 
 @dataclass
@@ -54,13 +57,13 @@ class TokenCounts:
 
     Inputs: generated token ID list + think_end token id.
     Outputs:
-        reasoning_token_count: Tokens strictly before think_end (or all if missing).
+        reasoning_token_count: Tokens between think tags; None if think_end is missing.
         answer_token_count: Tokens after think_end (0 if missing).
         total_generated_token_count: len(output_token_ids).
         think_end_index: Index of think_end in output_token_ids, or -1.
     """
 
-    reasoning_token_count: int
+    reasoning_token_count: int | None
     answer_token_count: int
     total_generated_token_count: int
     think_end_index: int
@@ -71,8 +74,8 @@ class InferenceResult:
     """Full CoT generation result for one sample.
 
     This is the primary artifact saved as JSON/JSONL.
-    Hidden-state paths and forced-answer fields can be added later
-    without breaking existing consumers.
+    Raw generation fields support Dataset-team handoff. Hidden-state extraction
+    and forced-answer generation are separate, unimplemented extensions.
     """
 
     sample_id: str
@@ -87,7 +90,7 @@ class InferenceResult:
     final_answer: str
     input_token_ids: list[int]
     output_token_ids: list[int]
-    reasoning_token_count: int
+    reasoning_token_count: int | None
     answer_token_count: int
     total_generated_token_count: int
     latency_seconds: float
@@ -95,6 +98,15 @@ class InferenceResult:
     backend: str
     created_at: str = field(default_factory=_utc_now_iso)
     metadata: dict[str, Any] = field(default_factory=dict)
+
+    prompt_text: str | None = None
+    tokenizer_name: str | None = None
+    tokenizer_revision: str | None = None
+    finish_reason: str | None = None
+    eos_token_ids: list[int] = field(default_factory=list)
+    question_id: int | str | None = None
+    split: str = "test"
+    prompt_version: str = "image_question_v1"
 
     def to_dict(self, *, include_token_ids: bool = True) -> dict[str, Any]:
         """Convert to a JSON-serializable dict.

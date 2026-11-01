@@ -62,6 +62,7 @@ def count_reasoning_tokens(
     output_token_ids: list[int],
     *,
     think_end_token_id: int = DEFAULT_THINK_END_TOKEN_ID,
+    think_start_token_id: int = 151667,
 ) -> TokenCounts:
     """Count reasoning / answer tokens using the think-end token ID.
 
@@ -74,23 +75,27 @@ def count_reasoning_tokens(
 
     Returns:
         TokenCounts with reasoning/answer/total counts and think_end_index.
-        If think_end is missing, all generated tokens are counted as reasoning.
+        If think_end is missing, reasoning count is unknown (None). Think tags are excluded.
     """
     total = len(output_token_ids)
     try:
         end_idx = output_token_ids.index(think_end_token_id)
     except ValueError:
         return TokenCounts(
-            reasoning_token_count=total,
+            reasoning_token_count=None,
             answer_token_count=0,
             total_generated_token_count=total,
             think_end_index=-1,
         )
 
-    # Tokens before think_end are reasoning; tokens after are the answer.
-    # The think_end token itself is counted with reasoning (end of think span).
-    reasoning_count = end_idx + 1
-    answer_count = total - reasoning_count
+    start_idx = (
+        output_token_ids.index(think_start_token_id) + 1
+        if think_start_token_id in output_token_ids else 0
+    )
+    if start_idx > end_idx:
+        raise ValueError("Opening think tag occurs after closing tag")
+    reasoning_count = end_idx - start_idx
+    answer_count = total - end_idx - 1
     return TokenCounts(
         reasoning_token_count=reasoning_count,
         answer_token_count=answer_count,

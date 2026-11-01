@@ -89,13 +89,16 @@ class Qwen3VLRunner:
         if self.config.model.attn_implementation:
             model_kwargs["attn_implementation"] = self.config.model.attn_implementation
 
-        self.processor = AutoProcessor.from_pretrained(
-            self.config.model.model_id,
-            revision=self.config.model.revision,
-        )
         self.model = Qwen3VLForConditionalGeneration.from_pretrained(
             self.config.model.model_id,
             **model_kwargs,
+        )
+        # Pin the processor to the exact snapshot actually loaded by the model.
+        self.model_revision = getattr(self.model.config, "_commit_hash", None)
+        if not self.model_revision:
+            self.model_revision = self.config.model.revision
+        self.processor = AutoProcessor.from_pretrained(
+            self.config.model.model_id, revision=self.model_revision,
         )
         self.model.eval()
         for param in self.model.parameters():
@@ -157,17 +160,21 @@ class Qwen3VLRunner:
         # If the installed version rejects it, retry without it and record a note.
         generate_kwargs["presence_penalty"] = gen_cfg.presence_penalty
 
+        if self._torch.cuda.is_available():
+            self._torch.cuda.synchronize()
         started = time.perf_counter()
         presence_penalty_applied = True
         with self._torch.inference_mode():
             try:
                 generated = self.model.generate(**inputs, **generate_kwargs)
-            except TypeError as exc:
+            except (TypeError, ValueError) as exc:
                 if "presence_penalty" not in str(exc):
                     raise
                 generate_kwargs.pop("presence_penalty", None)
                 presence_penalty_applied = False
                 generated = self.model.generate(**inputs, **generate_kwargs)
+        if self._torch.cuda.is_available():
+            self._torch.cuda.synchronize()
         latency = time.perf_counter() - started
 
         input_ids = inputs["input_ids"][0].tolist()
@@ -190,7 +197,17 @@ class Qwen3VLRunner:
         )
 
         # Also keep a raw decode of the full generation for auditing.
-        raw_output = _decode(output_token_ids)
+        tokenizer = self.processor.tokenizer
+        raw_output = tokenizer.decode(output_token_ids, skip_special_tokens=False)
+        prompt_text = tokenizer.decode(input_ids, skip_special_tokens=False)
+        eos = self.model.generation_config.eos_token_id
+        eos_ids = [eos] if isinstance(eos, int) else list(eos or [])
+        if output_token_ids and output_token_ids[-1] in eos_ids:
+            finish_reason = "stop"
+        elif len(output_token_ids) == gen_cfg.max_new_tokens:
+            finish_reason = "length"
+        else:
+            raise ValueError("Generation ended without EOS or max_new_tokens; cannot classify finish_reason")
 
         # If token-ID path missed the end marker but text still contains it
         # (e.g. unexpected decode), fall back to text split.
@@ -209,8 +226,8 @@ class Qwen3VLRunner:
         return InferenceResult(
             sample_id=sample.sample_id,
             model_name=self.config.model.model_id,
-            model_revision=self.config.model.revision,
-            dtype=self.config.model.dtype,
+            model_revision=self.model_revision,
+            dtype=str(self.model.dtype).removeprefix("torch."),
             image_path=str(image_ref),
             question=sample.question,
             generation_config={
@@ -228,6 +245,14 @@ class Qwen3VLRunner:
             latency_seconds=latency,
             parse_status=parsed.parse_status,
             backend="qwen3_vl",
+            prompt_text=prompt_text,
+            tokenizer_name=self.config.model.model_id,
+            tokenizer_revision=self.model_revision,
+            finish_reason=finish_reason,
+            eos_token_ids=eos_ids,
+            question_id=sample.question_id,
+            split=sample.split,
+            prompt_version=sample.prompt_version,
             metadata={
                 **sample.metadata,
                 "think_end_index": counts.think_end_index,

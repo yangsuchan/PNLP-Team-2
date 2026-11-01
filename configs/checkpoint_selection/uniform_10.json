@@ -1,0 +1,6 @@
+{
+  "checkpoint_selection": {
+    "strategy": "uniform",
+    "max_checkpoints": 10
+  }
+}

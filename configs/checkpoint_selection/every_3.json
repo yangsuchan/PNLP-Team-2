@@ -1,0 +1,6 @@
+{
+  "checkpoint_selection": {
+    "strategy": "every_n",
+    "interval": 3
+  }
+}

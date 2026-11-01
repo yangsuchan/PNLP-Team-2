@@ -1,0 +1,16 @@
+{"question_id": 900000000001, "split": "train", "reference_answers": ["brown"], "synthetic": true}
+{"question_id": 900000000002, "split": "train", "reference_answers": ["one"], "synthetic": true}
+{"question_id": 900000000003, "split": "validation", "reference_answers": ["left"], "synthetic": true}
+{"question_id": 900000000004, "split": "train", "reference_answers": ["table"], "synthetic": true}
+{"question_id": 900000000005, "split": "validation", "reference_answers": ["left"], "synthetic": true}
+{"question_id": 900000000006, "split": "validation", "reference_answers": ["yes"], "synthetic": true}
+{"question_id": 900000000007, "split": "test", "reference_answers": ["radiator"], "synthetic": true}
+{"question_id": 900000000008, "split": "train", "reference_answers": ["brown"], "synthetic": true}
+{"question_id": 900000000009, "split": "test", "reference_answers": ["mirror"], "synthetic": true}
+{"question_id": 900000000010, "split": "test", "reference_answers": ["right"], "synthetic": true}
+{"question_id": 910000000001, "split": "test", "reference_answers": ["brown"], "synthetic": true}
+{"question_id": 910000000002, "split": "test", "reference_answers": ["two"], "synthetic": true}
+{"question_id": 910000000003, "split": "test", "reference_answers": ["left"], "synthetic": true}
+{"question_id": 910000000004, "split": "test", "reference_answers": ["yes"], "synthetic": true}
+{"question_id": 910000000005, "split": "test", "reference_answers": ["table"], "synthetic": true}
+{"question_id": 910000000006, "split": "test", "reference_answers": ["right"], "synthetic": true}

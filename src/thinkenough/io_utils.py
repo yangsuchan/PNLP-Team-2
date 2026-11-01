@@ -54,6 +54,9 @@ def load_samples_jsonl(path: str | Path) -> list[InferenceSample]:
                     image_path=str(obj["image_path"]),
                     question=str(obj["question"]),
                     metadata=dict(obj.get("metadata") or {}),
+                    question_id=obj.get("question_id", obj["sample_id"]),
+                    split=obj.get("split", "test"),
+                    prompt_version=obj.get("prompt_version", "image_question_v1"),
                 )
             )
     return samples
