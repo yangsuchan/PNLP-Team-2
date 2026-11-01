@@ -1,0 +1,2 @@
+{"sample_id": "sample_0001", "image_path": "data/samples/sample_image.png", "question": "Describe what you see in this image and explain your reasoning.", "metadata": {"source": "fixture"}}
+{"sample_id": "sample_0002", "image_path": "tests/fixtures/sample_image.png", "question": "What dominant color appears in this image?", "metadata": {"source": "fixture"}}

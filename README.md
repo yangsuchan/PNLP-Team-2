@@ -66,3 +66,50 @@ CONTINUE    STOP
    |         |
    v         v
 Next Step   Final Answer
+```
+
+---
+
+## Model Inference (Phase 0)
+
+Base model: `Qwen/Qwen3-VL-8B-Thinking` (frozen).  
+Local machines (e.g. 8GB VRAM) should use the **mock** backend. Full model inference is intended for a GPU server (e.g. RTX 4090 24GB) after explicit approval.
+
+### Setup (local, no model weights)
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+### Mock inference (safe default)
+
+```bash
+python scripts/run_inference.py --config configs/inference_default.yaml --backend mock
+```
+
+Outputs are written under `outputs/` as per-sample JSON and a combined JSONL file.
+
+### Unit tests
+
+```bash
+PYTHONPATH=src pytest tests/ -q
+```
+
+### GPU server checklist (do not run locally without approval)
+
+1. Install server deps: `torch` (CUDA build), `transformers>=4.57.0`, `accelerate`
+2. Confirm GPU / VRAM (`nvidia-smi`)
+3. Download `Qwen/Qwen3-VL-8B-Thinking` weights
+4. Run a single sample:
+
+```bash
+python scripts/run_inference.py \
+  --config configs/inference_default.yaml \
+  --backend qwen3_vl \
+  --input data/samples/example_inputs.jsonl \
+  --max-samples 1
+```
+
+5. Verify `</think>` / token id `151668` appears in outputs and that JSONL fields match the mock schema

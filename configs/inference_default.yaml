@@ -1,0 +1,39 @@
+# ThinkEnough — Full CoT inference config
+# Default backend is mock so local (8GB VRAM) machines stay safe.
+
+backend: mock
+
+model:
+  model_id: Qwen/Qwen3-VL-8B-Thinking
+  revision: null
+  # BF16 is the official weight dtype; do not change casually.
+  dtype: bfloat16
+  device_map: auto
+  # Optional: flash_attention_2 on GPU servers that support it.
+  attn_implementation: null
+
+# VL Thinking defaults from the Hugging Face model card for
+# Qwen3-VL-8B-Thinking. Mintlify docs also list temperature=0.6;
+# keep the model-card values here and override in experiment configs.
+generation:
+  max_new_tokens: 40960
+  do_sample: true
+  temperature: 1.0
+  top_p: 0.95
+  top_k: 20
+  repetition_penalty: 1.0
+  presence_penalty: 0.0
+  seed: 1234
+
+io:
+  output_dir: outputs
+  save_token_ids: true
+  # Relative paths are resolved from the repository root.
+  input_jsonl: data/samples/example_inputs.jsonl
+
+# Qwen3-VL Thinking special token IDs (tokenizer_config.json).
+# THINK_START is usually already in the prompt for Thinking models.
+thinking:
+  think_start_token_id: 151667
+  think_end_token_id: 151668
+  think_end_text: "</think>"

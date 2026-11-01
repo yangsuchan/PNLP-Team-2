@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+.env
+
+# Local outputs and large artifacts
+outputs/
+*.pt
+*.pth
+*.bin
+*.safetensors
+*.ckpt
+*.npz
+*.h5
+
+# Model weights / caches
+models/
+checkpoints/
+.cache/
+huggingface/
+*.gguf
+
+# Data (keep small sample manifests; ignore large datasets)
+data/raw/
+data/processed/
+!data/samples/
+!data/samples/**
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Secrets
+.env.*
+!.env.example
+*.pem
+id_rsa*
+credentials.json

@@ -1,0 +1,14 @@
+# Local development (no GPU / no model weights required)
+PyYAML>=6.0
+Pillow>=10.0
+pytest>=8.0
+
+# ---------------------------------------------------------------------------
+# GPU server dependencies (install only after explicit approval)
+# Do NOT install these on the local 8GB VRAM machine for full 8B inference.
+#
+# torch                      # install the CUDA build matching the server
+# transformers>=4.57.0       # required for Qwen3VLForConditionalGeneration
+# accelerate>=0.33.0
+# qwen-vl-utils>=0.0.14      # optional; use if vision preprocessing needs it
+# ---------------------------------------------------------------------------

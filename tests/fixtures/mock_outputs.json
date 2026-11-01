@@ -1,0 +1,6 @@
+{
+  "prefix_format": "Step 1: look at the image.\nStep 2: answer carefully.\n</think>\n\nThe answer is blue.",
+  "full_tag_format": "<think>\nI reason step by step.\n</think>\n\nFinal: 42",
+  "missing_think_end": "Still thinking without a closing tag...",
+  "empty": "   "
+}
