@@ -14,6 +14,7 @@ GPU server (requires approval + transformers/torch):
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -27,7 +28,7 @@ if str(_SRC) not in sys.path:
 from thinkenough.config import load_inference_config
 from thinkenough.inference import create_runner
 from thinkenough.io_utils import load_samples_jsonl, save_result_json, save_results_jsonl
-from thinkenough.schemas import InferenceSample
+from thinkenough.schemas import InferenceResult, InferenceSample
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -46,6 +47,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         choices=["mock", "qwen3_vl"],
         default=None,
         help="Override config backend (default: value from YAML, usually mock)",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=["full", "direct"],
+        default="full",
+        help="full: generate reasoning. direct: close the think tag and answer at once",
+    )
+    parser.add_argument(
+        "--model-id",
+        type=str,
+        default=None,
+        help="Override config model id (e.g. Qwen/Qwen3-VL-8B-Instruct)",
+    )
+    parser.add_argument(
+        "--revision",
+        type=str,
+        default=None,
+        help="Override config model revision. Pass it with --model-id",
     )
     parser.add_argument(
         "--input",
@@ -82,6 +101,10 @@ def main(argv: list[str] | None = None) -> int:
         config.backend = args.backend
     if args.output_dir is not None:
         config.io.output_dir = args.output_dir
+    if args.model_id is not None:
+        config.model.model_id = args.model_id
+    if args.revision is not None:
+        config.model.revision = args.revision
 
     input_path = (
         config.resolve_path(args.input)
@@ -134,11 +157,21 @@ def main(argv: list[str] | None = None) -> int:
 
     results = []
     for sample in samples:
-        print(f"[run] {sample.sample_id} ({config.backend})")
-        result = runner.generate_cot(sample)
+        per_sample_path = output_dir / f"{sample.sample_id}_{config.backend}.json"
+        # Finished samples are kept, so an interrupted GPU run can resume.
+        if per_sample_path.is_file():
+            print(f"[skip] {sample.sample_id} already done")
+            with per_sample_path.open(encoding="utf-8") as f:
+                results.append(InferenceResult.from_dict(json.load(f)))
+            continue
+
+        print(f"[run] {sample.sample_id} ({config.backend}, {args.mode})")
+        if args.mode == "direct":
+            result = runner.forced_answer(sample)
+        else:
+            result = runner.generate_cot(sample)
         results.append(result)
 
-        per_sample_path = output_dir / f"{result.sample_id}_{config.backend}.json"
         save_result_json(
             result,
             per_sample_path,

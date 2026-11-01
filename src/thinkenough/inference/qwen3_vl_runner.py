@@ -46,11 +46,7 @@ def _resolve_torch_dtype(dtype_name: str):
 
 
 class Qwen3VLRunner:
-    """Frozen Qwen3-VL Thinking runner for Full CoT generation.
-
-    Extension hooks for Hidden State / Forced-Answer are documented on
-    ``ModelRunner`` but intentionally not implemented here yet.
-    """
+    """Frozen Qwen3-VL Thinking runner: Full CoT, forced answers, and hidden states."""
 
     def __init__(self, config: InferenceConfig) -> None:
         self.config = config
@@ -104,33 +100,32 @@ class Qwen3VLRunner:
         self._torch = torch
         self._loaded = True
 
-    def generate_cot(self, sample: InferenceSample) -> InferenceResult:
-        """Run Full CoT generation for one multimodal sample.
-
-        Args:
-            sample: Image + question sample.
-
-        Returns:
-            InferenceResult with parsed reasoning/answer and token metadata.
-        """
-        self.load()
+    def _prepare_inputs(self, sample: InferenceSample) -> tuple[Any, str | Path | None]:
+        """Tokenize one sample. An empty ``image_path`` means text-only input."""
         assert self.model is not None and self.processor is not None
 
-        image_path = self.config.resolve_path(sample.image_path)
-        if not image_path.exists() and not str(sample.image_path).startswith(
-            ("http://", "https://")
-        ):
-            # Allow remote URLs as in the official example; otherwise require a file.
-            raise FileNotFoundError(f"Image not found: {image_path}")
+        image_ref: str | Path | None = None
+        if sample.image_path:
+            if str(sample.image_path).startswith(("http://", "https://")):
+                # Allow remote URLs as in the official example.
+                image_ref = sample.image_path
+            else:
+                image_ref = self.config.resolve_path(sample.image_path)
+                if not image_ref.exists():
+                    raise FileNotFoundError(f"Image not found: {image_ref}")
 
-        image_ref: str | Path
-        if str(sample.image_path).startswith(("http://", "https://")):
-            image_ref = sample.image_path
-        else:
-            image_ref = image_path
+        video_frames = None
+        if sample.video_path:
+            folder = self.config.resolve_path(sample.video_path)
+            video_frames = sorted(str(p) for p in folder.glob("*.jpg"))
+            if not video_frames:
+                raise FileNotFoundError(f"No video frames in: {folder}")
+            # Frames are already sampled; the processor must keep all of them.
+            self.processor.video_processor.do_sample_frames = False
 
-        messages = build_qwen3_vl_messages(sample, image_path=image_ref)
-
+        messages = build_qwen3_vl_messages(
+            sample, image_path=image_ref or "", video_frames=video_frames
+        )
         inputs = self.processor.apply_chat_template(
             messages,
             tokenize=True,
@@ -140,10 +135,10 @@ class Qwen3VLRunner:
         )
         # Match official docs / HF model_doc guidance.
         inputs.pop("token_type_ids", None)
+        return inputs.to(self.model.device), image_ref
 
-        device = self.model.device
-        inputs = inputs.to(device)
-
+    def _generate(self, inputs: Any) -> tuple[list[int], list[int], float, dict[str, Any]]:
+        """Run generation; return input ids, new ids, latency, and run metadata."""
         gen_cfg = self.config.generation
         generate_kwargs: dict[str, Any] = {
             "max_new_tokens": gen_cfg.max_new_tokens,
@@ -153,16 +148,22 @@ class Qwen3VLRunner:
             "top_k": gen_cfg.top_k,
             "repetition_penalty": gen_cfg.repetition_penalty,
         }
+        if gen_cfg.num_beams > 1:
+            generate_kwargs["num_beams"] = gen_cfg.num_beams
         # presence_penalty: supported in recent transformers GenerationConfig.
         # If the installed version rejects it, retry without it and record a note.
         generate_kwargs["presence_penalty"] = gen_cfg.presence_penalty
+
+        has_cuda = self._torch.cuda.is_available()
+        if has_cuda:
+            self._torch.cuda.reset_peak_memory_stats()
 
         started = time.perf_counter()
         presence_penalty_applied = True
         with self._torch.inference_mode():
             try:
                 generated = self.model.generate(**inputs, **generate_kwargs)
-            except TypeError as exc:
+            except (TypeError, ValueError) as exc:
                 if "presence_penalty" not in str(exc):
                     raise
                 generate_kwargs.pop("presence_penalty", None)
@@ -171,8 +172,141 @@ class Qwen3VLRunner:
         latency = time.perf_counter() - started
 
         input_ids = inputs["input_ids"][0].tolist()
-        full_ids = generated[0].tolist()
-        output_token_ids = full_ids[len(input_ids) :]
+        output_token_ids = generated[0].tolist()[len(input_ids) :]
+        run_meta = {
+            "presence_penalty_applied": presence_penalty_applied,
+            "peak_vram_gb": (
+                self._torch.cuda.max_memory_allocated() / 1e9 if has_cuda else None
+            ),
+        }
+        return input_ids, output_token_ids, latency, run_meta
+
+    def _append_tokens(self, inputs: Any, token_ids: list[int]) -> None:
+        """Extend tokenized inputs in place with plain text tokens."""
+        torch = self._torch
+        extra = torch.tensor(
+            [token_ids], dtype=inputs["input_ids"].dtype, device=self.model.device
+        )
+        for key, values in (
+            ("input_ids", extra),
+            ("attention_mask", torch.ones_like(extra)),
+            ("mm_token_type_ids", torch.zeros_like(extra)),
+        ):
+            if key in inputs:
+                inputs[key] = torch.cat([inputs[key], values], dim=1)
+
+    def decode_tokens(self, token_ids: list[int]) -> list[str]:
+        """Decode each token separately, for finding sentence ends."""
+        return [self.processor.decode([token_id]) for token_id in token_ids]
+
+    def extract_hidden_state(
+        self, sample: InferenceSample, prefix_token_ids: list[int]
+    ) -> Any:
+        """Last-layer hidden state at the last token of a reasoning prefix (AGENTS.md 5.2).
+
+        The input stops at the prefix, so no later reasoning or answer can leak in.
+
+        Args:
+            sample: The sample whose reasoning is being read.
+            prefix_token_ids: Generated reasoning tokens up to the checkpoint.
+
+        Returns:
+            1-D float32 CPU tensor of the text hidden size.
+        """
+        self.load()
+        inputs, _ = self._prepare_inputs(sample)
+        if prefix_token_ids:
+            self._append_tokens(inputs, prefix_token_ids)
+        with self._torch.inference_mode():
+            outputs = self.model.model(**inputs, use_cache=False)
+        return outputs.last_hidden_state[0, -1].float().cpu()
+
+    def forced_answer(
+        self,
+        sample: InferenceSample,
+        reasoning_prefix: str = "",
+        prefix_token_ids: list[int] | None = None,
+    ) -> InferenceResult:
+        """Answer immediately from a reasoning prefix (AGENTS.md 5.3).
+
+        The chat template already ends with ``<think>\\n``, so closing the tag
+        here makes the model answer from this prefix only. An empty prefix is
+        the direct-answer baseline.
+
+        Args:
+            sample: Multimodal or text-only sample.
+            reasoning_prefix: Reasoning text up to the checkpoint. Must not
+                contain later reasoning or the original final answer.
+            prefix_token_ids: The same prefix as token ids. Takes priority, so a
+                checkpoint maps exactly onto the original generation.
+
+        Returns:
+            InferenceResult whose ``final_answer`` is the forced answer.
+        """
+        self.load()
+        inputs, image_ref = self._prepare_inputs(sample)
+        tokenizer = self.processor.tokenizer
+        if prefix_token_ids is None:
+            prefix_token_ids = (
+                tokenizer(reasoning_prefix, add_special_tokens=False).input_ids
+                if reasoning_prefix
+                else []
+            )
+        else:
+            reasoning_prefix = self.processor.decode(prefix_token_ids)
+        closing = tokenizer(
+            f"\n{self.config.thinking.think_end_text}\n\n", add_special_tokens=False
+        ).input_ids
+        self._append_tokens(inputs, list(prefix_token_ids) + closing)
+
+        input_ids, output_token_ids, latency, run_meta = self._generate(inputs)
+        answer = self.processor.decode(
+            output_token_ids,
+            skip_special_tokens=True,
+            clean_up_tokenization_spaces=False,
+        ).strip()
+
+        return InferenceResult(
+            sample_id=sample.sample_id,
+            model_name=self.config.model.model_id,
+            model_revision=self.config.model.revision,
+            dtype=self.config.model.dtype,
+            image_path=str(image_ref or ""),
+            question=sample.question,
+            generation_config={
+                **self.config.generation.to_dict(),
+                "presence_penalty_applied": run_meta["presence_penalty_applied"],
+            },
+            raw_output=answer,
+            reasoning_text=reasoning_prefix,
+            final_answer=answer,
+            input_token_ids=input_ids,
+            output_token_ids=output_token_ids,
+            reasoning_token_count=len(prefix_token_ids),
+            answer_token_count=len(output_token_ids),
+            total_generated_token_count=len(output_token_ids),
+            latency_seconds=latency,
+            parse_status="ok" if answer else "empty_generation",
+            backend="qwen3_vl",
+            metadata={
+                **sample.metadata,
+                "forced_answer": True,
+                "peak_vram_gb": run_meta["peak_vram_gb"],
+            },
+        )
+
+    def generate_cot(self, sample: InferenceSample) -> InferenceResult:
+        """Run Full CoT generation for one multimodal or text-only sample.
+
+        Args:
+            sample: Question sample, with an image path or an empty path.
+
+        Returns:
+            InferenceResult with parsed reasoning/answer and token metadata.
+        """
+        self.load()
+        inputs, image_ref = self._prepare_inputs(sample)
+        input_ids, output_token_ids, latency, run_meta = self._generate(inputs)
 
         # Prefer token-ID based segmentation so think tags are not lost when
         # skip_special_tokens=True strips them from decoded text.
@@ -211,11 +345,11 @@ class Qwen3VLRunner:
             model_name=self.config.model.model_id,
             model_revision=self.config.model.revision,
             dtype=self.config.model.dtype,
-            image_path=str(image_ref),
+            image_path=str(image_ref or ""),
             question=sample.question,
             generation_config={
-                **gen_cfg.to_dict(),
-                "presence_penalty_applied": presence_penalty_applied,
+                **self.config.generation.to_dict(),
+                "presence_penalty_applied": run_meta["presence_penalty_applied"],
             },
             raw_output=raw_output,
             reasoning_text=parsed.reasoning_text,
@@ -231,5 +365,6 @@ class Qwen3VLRunner:
             metadata={
                 **sample.metadata,
                 "think_end_index": counts.think_end_index,
+                "peak_vram_gb": run_meta["peak_vram_gb"],
             },
         )

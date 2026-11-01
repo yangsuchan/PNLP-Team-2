@@ -16,27 +16,27 @@ def build_qwen3_vl_messages(
     sample: InferenceSample,
     *,
     image_path: str | Path | None = None,
+    video_frames: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Build a single-turn multimodal chat for Qwen3-VL.
 
     Args:
         sample: Inference sample containing question (and default image path).
         image_path: Optional override path/URL. If None, uses sample.image_path.
+            An empty path leaves the image out (text-only sample).
+        video_frames: Optional frame paths, shown to the model as one video.
 
     Returns:
         A messages list compatible with ``processor.apply_chat_template``:
         ``[{"role": "user", "content": [{"type": "image", ...}, {"type": "text", ...}]}]``
     """
     resolved_image = str(image_path if image_path is not None else sample.image_path)
-    return [
-        {
-            "role": "user",
-            "content": [
-                {"type": "image", "image": resolved_image},
-                {"type": "text", "text": sample.question},
-            ],
-        }
-    ]
+    content: list[dict[str, Any]] = [{"type": "text", "text": sample.question}]
+    if resolved_image:  # An empty path means a text-only sample.
+        content.insert(0, {"type": "image", "image": resolved_image})
+    if video_frames:
+        content.insert(0, {"type": "video", "video": video_frames})
+    return [{"role": "user", "content": content}]
 
 
 def validate_messages(messages: list[dict[str, Any]]) -> None:

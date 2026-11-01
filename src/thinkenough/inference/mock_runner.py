@@ -20,6 +20,30 @@ class MockRunner:
         self.think_end_token_id = config.thinking.think_end_token_id
         self.think_end_text = config.thinking.think_end_text
 
+    def forced_answer(
+        self,
+        sample: InferenceSample,
+        reasoning_prefix: str = "",
+        prefix_token_ids: list[int] | None = None,
+    ) -> InferenceResult:
+        """Produce a fake forced answer without reasoning generation."""
+        result = self.generate_cot(sample)
+        result.reasoning_text = reasoning_prefix
+        result.raw_output = result.final_answer
+        result.reasoning_token_count = len(prefix_token_ids or [])
+        result.metadata["forced_answer"] = True
+        return result
+
+    def extract_hidden_state(
+        self, sample: InferenceSample, prefix_token_ids: list[int]
+    ) -> list[float]:
+        """Return a fixed fake hidden state."""
+        return [0.0] * 8
+
+    def decode_tokens(self, token_ids: list[int]) -> list[str]:
+        """Treat every third fake token as a sentence end."""
+        return ["." if i % 3 == 2 else "x" for i in range(len(token_ids))]
+
     def generate_cot(self, sample: InferenceSample) -> InferenceResult:
         """Produce a fake Full CoT result for ``sample``.
 

@@ -1,0 +1,31 @@
+# Pilot on SCoT Level 2-3 tasks. Generation defaults match inference_default.yaml.
+backend: qwen3_vl
+
+model:
+  model_id: Qwen/Qwen3-VL-8B-Thinking
+  # Pinned so results stay reproducible if the model repository changes.
+  revision: 92f3c4b4feadd3a016ef468d103bb5f58b2a2c6b
+  dtype: bfloat16
+  device_map: auto
+  attn_implementation: null
+
+generation:
+  # shortcut: 4096 caps very long reasoning, so raise it if many samples are truncated.
+  max_new_tokens: 4096
+  do_sample: true
+  temperature: 1.0
+  top_p: 0.95
+  top_k: 20
+  repetition_penalty: 1.0
+  presence_penalty: 0.0
+  seed: 1234
+
+io:
+  output_dir: outputs/pilot
+  save_token_ids: true
+  input_jsonl: data/processed/pilot_text.jsonl
+
+thinking:
+  think_start_token_id: 151667
+  think_end_token_id: 151668
+  think_end_text: "</think>"

@@ -6,7 +6,7 @@ in later phases without changing the Full CoT result schema.
 
 from __future__ import annotations
 
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from thinkenough.config import InferenceConfig
 from thinkenough.schemas import InferenceResult, InferenceSample
@@ -31,22 +31,24 @@ class ModelRunner(Protocol):
         """
         ...
 
-    # --- Phase 0+ extension points (not implemented yet) ---
-    #
-    # def extract_hidden_states(
-    #     self,
-    #     sample: InferenceSample,
-    #     reasoning_prefix_token_ids: list[int],
-    #     checkpoint_indices: list[int],
-    # ) -> ...:
-    #     """Extract last-layer hidden states at reasoning checkpoints."""
-    #
-    # def forced_answer(
-    #     self,
-    #     sample: InferenceSample,
-    #     reasoning_prefix: str,
-    # ) -> ...:
-    #     """Generate a final answer from a truncated reasoning prefix."""
+    def forced_answer(
+        self,
+        sample: InferenceSample,
+        reasoning_prefix: str = "",
+        prefix_token_ids: list[int] | None = None,
+    ) -> InferenceResult:
+        """Answer immediately from a reasoning prefix. Empty prefix = direct answer."""
+        ...
+
+    def extract_hidden_state(
+        self, sample: InferenceSample, prefix_token_ids: list[int]
+    ) -> Any:
+        """Last-layer hidden state at the last token of a reasoning prefix."""
+        ...
+
+    def decode_tokens(self, token_ids: list[int]) -> list[str]:
+        """Decode each token separately, for finding sentence ends."""
+        ...
 
 
 def create_runner(config: InferenceConfig) -> ModelRunner:

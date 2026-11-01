@@ -1,0 +1,31 @@
+# SCoT-Reasoner's generation settings applied to Qwen (models/Chat3DLLM.py, evaluate).
+# Purpose: measure what these settings do to long reasoning, as evidence for pilot.yaml.
+backend: qwen3_vl
+
+model:
+  model_id: Qwen/Qwen3-VL-8B-Thinking
+  revision: 92f3c4b4feadd3a016ef468d103bb5f58b2a2c6b
+  dtype: bfloat16
+  device_map: auto
+  attn_implementation: null
+
+generation:
+  max_new_tokens: 240
+  do_sample: false
+  temperature: 1.0
+  top_p: 1.0
+  top_k: 0
+  repetition_penalty: 3.0
+  presence_penalty: 0.0
+  num_beams: 5
+  seed: 1234
+
+io:
+  output_dir: outputs/pilot/scot_settings
+  save_token_ids: true
+  input_jsonl: data/processed/pilot_full.jsonl
+
+thinking:
+  think_start_token_id: 151667
+  think_end_token_id: 151668
+  think_end_text: "</think>"

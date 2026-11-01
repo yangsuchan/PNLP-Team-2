@@ -31,6 +31,7 @@ class GenerationConfig:
     top_k: int = 20
     repetition_penalty: float = 1.0
     presence_penalty: float = 0.0
+    num_beams: int = 1
     seed: int = 1234
 
     def to_dict(self) -> dict[str, Any]:
@@ -42,6 +43,7 @@ class GenerationConfig:
             "top_k": self.top_k,
             "repetition_penalty": self.repetition_penalty,
             "presence_penalty": self.presence_penalty,
+            "num_beams": self.num_beams,
             "seed": self.seed,
         }
 
