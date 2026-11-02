@@ -3,8 +3,8 @@
 backend: qwen3_vl
 
 model:
-  model_id: Qwen/Qwen3-VL-8B-Thinking
-  revision: 92f3c4b4feadd3a016ef468d103bb5f58b2a2c6b
+  model_id: Qwen/Qwen3.5-9B
+  revision: c202236235762e1c871ad0ccb60c8ee5ba337b9a
   dtype: bfloat16
   device_map: auto
   attn_implementation: null
@@ -26,6 +26,6 @@ io:
   input_jsonl: data/processed/pilot_full.jsonl
 
 thinking:
-  think_start_token_id: 151667
-  think_end_token_id: 151668
+  think_start_token_id: 248068
+  think_end_token_id: 248069
   think_end_text: "</think>"

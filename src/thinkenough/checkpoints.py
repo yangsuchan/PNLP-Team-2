@@ -1,46 +1,77 @@
-"""Reasoning checkpoints and the analysis of answers forced at those checkpoints."""
+"""Reasoning checkpoints and stopping rules evaluated on recorded reasoning.
+
+Checkpoints sit every fixed number of tokens, as in Answer-Readiness-Guided Early
+Stopping (arXiv 2609.34809). A position such as "40% of the reasoning" cannot be used
+while generating, because the total length is unknown until the reasoning ends.
+"""
 
 from __future__ import annotations
 
 import random
-from typing import Any, Iterable, Sequence
-
-SENTENCE_END_MARKS = (".", "!", "?", "\n")
-
-
-def sentence_ends(token_texts: Sequence[str]) -> list[int]:
-    """Token counts at which a sentence has just ended (ReProbe's signal concentrates there)."""
-    return [
-        index + 1
-        for index, text in enumerate(token_texts)
-        if text.rstrip(" ").endswith(SENTENCE_END_MARKS)
-    ]
+from dataclasses import dataclass, field
+from typing import Any, Callable, Sequence
 
 
-def pick_checkpoints(
-    token_texts: Sequence[str], fractions: Iterable[float] = (0.2, 0.4, 0.6, 0.8, 1.0)
-) -> list[tuple[float, int]]:
-    """Choose prefix lengths near each fraction of the reasoning, at sentence ends.
+def interval_checkpoints(total_tokens: int, interval: int = 256) -> list[int]:
+    """Prefix lengths to check, strictly before the reasoning ends on its own."""
+    return list(range(interval, total_tokens, interval))
 
-    Args:
-        token_texts: Decoded reasoning tokens, without the closing think tag.
-        fractions: Target positions, where 1.0 is the complete reasoning.
 
-    Returns:
-        (fraction, prefix length) pairs, unique by prefix length, ascending.
-    """
-    total = len(token_texts)
-    if total == 0:
-        return []
-    ends = sentence_ends(token_texts) or [total]
-    chosen: list[tuple[float, int]] = []
-    for fraction in sorted(fractions):
-        target = total * fraction
-        # The complete reasoning stays exact even when it does not end a sentence.
-        length = total if fraction >= 1.0 else min(ends, key=lambda end: abs(end - target))
-        if length not in (kept for _, kept in chosen):
-            chosen.append((fraction, length))
-    return chosen
+@dataclass
+class Checkpoint:
+    """One forced answer during a question's reasoning."""
+
+    tokens: int
+    correct: bool
+    missing: bool = False
+    row: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class QuestionTrace:
+    """What full thinking did on a question, plus its forced answers in token order."""
+
+    sample_id: str
+    scene_id: str
+    full_tokens: int
+    full_correct: bool
+    full_missing: bool
+    checkpoints: list[Checkpoint] = field(default_factory=list)
+
+
+@dataclass
+class Outcome:
+    """Result of a stopping rule on one question."""
+
+    tokens: int
+    correct: bool
+    missing: bool
+    stopped_at: int | None  # Checkpoint index, or None for running to the end.
+
+
+def run_rule(trace: QuestionTrace, stop_index: int | None) -> Outcome:
+    """Outcome of stopping at a checkpoint, or of full thinking when ``stop_index`` is None."""
+    if stop_index is None:
+        return Outcome(trace.full_tokens, trace.full_correct, trace.full_missing, None)
+    checkpoint = trace.checkpoints[stop_index]
+    return Outcome(checkpoint.tokens, checkpoint.correct, checkpoint.missing, stop_index)
+
+
+def fixed_cap(trace: QuestionTrace, cap: int) -> Outcome:
+    """Baseline: stop at the last checkpoint within a token cap, whatever the state."""
+    index = None
+    for position, checkpoint in enumerate(trace.checkpoints):
+        if checkpoint.tokens == cap:
+            index = position
+    return run_rule(trace, index)
+
+
+def oracle(trace: QuestionTrace) -> Outcome:
+    """Upper bound: stop at the first correct checkpoint, which needs the true answer."""
+    for position, checkpoint in enumerate(trace.checkpoints):
+        if checkpoint.correct:
+            return run_rule(trace, position)
+    return run_rule(trace, None)
 
 
 def bootstrap_mean_ci(
@@ -53,54 +84,29 @@ def bootstrap_mean_ci(
     return means[int(0.025 * samples)], means[int(0.975 * samples) - 1]
 
 
-def summarize_curve(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    """Accuracy by reasoning position, plus the best possible saving (the oracle).
+def summarize(traces: Sequence[QuestionTrace], rule: Callable[[QuestionTrace], Outcome]) -> dict[str, Any]:
+    """Compare a rule with full thinking on the same questions.
 
-    Stopping at one fixed position is the fixed-stop baseline, so each row of the
-    curve is that baseline. The oracle stops at each question's first correct
-    checkpoint, an upper bound that no real stopping rule can beat.
-
-    Args:
-        rows: One row per checkpoint with ``sample_id``, ``fraction``,
-            ``prefix_tokens``, ``reasoning_tokens_total``, and boolean ``correct``.
-
-    Returns:
-        ``curve`` list, ``oracle`` summary, and question count ``n``.
+    Accuracy differences are paired by question, so the interval reflects the change
+    itself rather than two separate accuracies.
     """
-    by_sample: dict[str, list[dict[str, Any]]] = {}
-    for row in rows:
-        by_sample.setdefault(row["sample_id"], []).append(row)
-    for group in by_sample.values():
-        group.sort(key=lambda row: row["prefix_tokens"])
-
-    curve = []
-    for fraction in sorted({row["fraction"] for row in rows}):
-        group = [row for row in rows if row["fraction"] == fraction]
-        correct = [float(row["correct"]) for row in group]
-        low, high = bootstrap_mean_ci(correct)
-        curve.append(
-            {
-                "fraction": fraction,
-                "n": len(group),
-                "accuracy": sum(correct) / len(correct),
-                "ci_low": low,
-                "ci_high": high,
-                "tokens_kept": sum(r["prefix_tokens"] for r in group)
-                / sum(r["reasoning_tokens_total"] for r in group),
-            }
-        )
-
-    kept = spent = 0
-    answered = 0
-    for group in by_sample.values():
-        total = group[-1]["reasoning_tokens_total"]
-        first = next((row for row in group if row["correct"]), None)
-        spent += total
-        # A question never answered correctly keeps its full reasoning.
-        kept += first["prefix_tokens"] if first else total
-        answered += first is not None
-    oracle = {
-        "accuracy": answered / len(by_sample),
-        "tokens_kept": kept / spent if spent else 0.0,
+    outcomes = [rule(trace) for trace in traces]
+    correct = [float(o.correct) for o in outcomes]
+    full = [float(t.full_correct) for t in traces]
+    tokens = sum(o.tokens for o in outcomes)
+    full_tokens = sum(t.full_tokens for t in traces)
+    change_low, change_high = bootstrap_mean_ci([c - f for c, f in zip(correct, full)])
+    return {
+        "n": len(traces),
+        "accuracy": sum(correct) / len(correct),
+        "accuracy_full": sum(full) / len(full),
+        "accuracy_change_ci": [change_low, change_high],
+        "net_correct": int(sum(correct) - sum(full)),
+        "reasoning_tokens_mean": tokens / len(traces),
+        "reasoning_tokens_full_mean": full_tokens / len(traces),
+        "token_reduction": 1 - tokens / full_tokens if full_tokens else 0.0,
+        "missing_answers": sum(o.missing for o in outcomes),
+        "missing_answers_full": sum(t.full_missing for t in traces),
+        "stopped_at_first_check": sum(o.stopped_at == 0 for o in outcomes) / len(outcomes),
+        "stopped_early": sum(o.stopped_at is not None for o in outcomes) / len(outcomes),
     }
-    return {"n": len(by_sample), "curve": curve, "oracle": oracle}

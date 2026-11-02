@@ -8,11 +8,12 @@ pytest>=8.0
 # Do NOT install these on the local 8GB VRAM machine for full 8B inference.
 #
 # torch                      # install the CUDA build matching the server
-# transformers>=4.57.0       # required for Qwen3VLForConditionalGeneration
+# transformers==5.10.2       # tested version; also loads Qwen3.5
 # accelerate>=0.33.0
 # qwen-vl-utils>=0.0.14      # optional; use if vision preprocessing needs it
 # torchvision                # the processor uses it to decode image files
 # opencv-python-headless     # samples frames from the scene videos
+# scikit-learn               # the linear answer-readiness detector
 # huggingface_hub            # SCoT files and scene attributes
 # pycocoevalcap              # ROUGE-L and METEOR as in SCoT; METEOR needs Java
 # ---------------------------------------------------------------------------

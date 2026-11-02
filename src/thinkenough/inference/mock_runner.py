@@ -36,15 +36,13 @@ class MockRunner:
 
     def extract_hidden_state(
         self, sample: InferenceSample, prefix_token_ids: list[int]
-    ) -> list[float]:
-        """Return a fixed fake hidden state."""
-        return [0.0] * 8
+    ) -> list[list[float]]:
+        """Return fixed fake hidden states: three layers of size eight."""
+        return [[float(len(prefix_token_ids))] * 8 for _ in range(3)]
 
-    def decode_tokens(self, token_ids: list[int]) -> list[str]:
-        """Treat every third fake token as a sentence end."""
-        return ["." if i % 3 == 2 else "x" for i in range(len(token_ids))]
-
-    def generate_cot(self, sample: InferenceSample) -> InferenceResult:
+    def generate_cot(
+        self, sample: InferenceSample, *, enable_thinking: bool = True
+    ) -> InferenceResult:
         """Produce a fake Full CoT result for ``sample``.
 
         Args:

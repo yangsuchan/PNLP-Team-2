@@ -19,11 +19,14 @@ class ModelRunner(Protocol):
     Implementations must keep the base model frozen (no training).
     """
 
-    def generate_cot(self, sample: InferenceSample) -> InferenceResult:
+    def generate_cot(
+        self, sample: InferenceSample, *, enable_thinking: bool = True
+    ) -> InferenceResult:
         """Generate a full Chain-of-Thought for one multimodal sample.
 
         Args:
             sample: Image path + question (+ optional metadata).
+            enable_thinking: False uses the model's non-thinking mode, if it has one.
 
         Returns:
             InferenceResult with raw output, parsed reasoning/answer,
@@ -43,12 +46,9 @@ class ModelRunner(Protocol):
     def extract_hidden_state(
         self, sample: InferenceSample, prefix_token_ids: list[int]
     ) -> Any:
-        """Last-layer hidden state at the last token of a reasoning prefix."""
+        """Hidden states of every text layer at the last token of a reasoning prefix."""
         ...
 
-    def decode_tokens(self, token_ids: list[int]) -> list[str]:
-        """Decode each token separately, for finding sentence ends."""
-        ...
 
 
 def create_runner(config: InferenceConfig) -> ModelRunner:

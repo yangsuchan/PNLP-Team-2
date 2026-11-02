@@ -65,11 +65,11 @@ class Qwen3VLRunner:
 
         try:
             import torch
-            from transformers import AutoProcessor, Qwen3VLForConditionalGeneration
+            from transformers import AutoModelForImageTextToText, AutoProcessor
             from transformers import set_seed
         except ImportError as exc:
             raise ImportError(
-                "Qwen3VLRunner requires torch and transformers>=4.57.0. "
+                "Qwen3VLRunner requires torch and transformers. "
                 "Install server dependencies only after approval. "
                 "See requirements.txt."
             ) from exc
@@ -89,7 +89,8 @@ class Qwen3VLRunner:
             self.config.model.model_id,
             revision=self.config.model.revision,
         )
-        self.model = Qwen3VLForConditionalGeneration.from_pretrained(
+        # The auto class also loads Qwen3.5, which the model comparison needs.
+        self.model = AutoModelForImageTextToText.from_pretrained(
             self.config.model.model_id,
             **model_kwargs,
         )
@@ -100,7 +101,13 @@ class Qwen3VLRunner:
         self._torch = torch
         self._loaded = True
 
-    def _prepare_inputs(self, sample: InferenceSample) -> tuple[Any, str | Path | None]:
+    def _think_end_token_id(self) -> int:
+        """The think-end token id differs between Qwen generations, so ask the tokenizer."""
+        return self.processor.tokenizer.convert_tokens_to_ids(self.config.thinking.think_end_text)
+
+    def _prepare_inputs(
+        self, sample: InferenceSample, *, enable_thinking: bool = True
+    ) -> tuple[Any, str | Path | None]:
         """Tokenize one sample. An empty ``image_path`` means text-only input."""
         assert self.model is not None and self.processor is not None
 
@@ -126,15 +133,23 @@ class Qwen3VLRunner:
         messages = build_qwen3_vl_messages(
             sample, image_path=image_ref or "", video_frames=video_frames
         )
+        template_options = {} if enable_thinking else {"enable_thinking": False}
         inputs = self.processor.apply_chat_template(
             messages,
             tokenize=True,
             add_generation_prompt=True,
             return_dict=True,
             return_tensors="pt",
+            **template_options,
         )
         # Match official docs / HF model_doc guidance.
         inputs.pop("token_type_ids", None)
+        if not enable_thinking and self._think_end_token_id() not in inputs["input_ids"][0][-4:].tolist():
+            # Qwen3-VL's template ignores this option and would think anyway.
+            raise ValueError(
+                f"{self.config.model.model_id} has no non-thinking mode. "
+                "Use its Instruct model instead."
+            )
         return inputs.to(self.model.device), image_ref
 
     def _generate(self, inputs: Any) -> tuple[list[int], list[int], float, dict[str, Any]]:
@@ -195,31 +210,44 @@ class Qwen3VLRunner:
             if key in inputs:
                 inputs[key] = torch.cat([inputs[key], values], dim=1)
 
-    def decode_tokens(self, token_ids: list[int]) -> list[str]:
-        """Decode each token separately, for finding sentence ends."""
-        return [self.processor.decode([token_id]) for token_id in token_ids]
-
     def extract_hidden_state(
         self, sample: InferenceSample, prefix_token_ids: list[int]
     ) -> Any:
-        """Last-layer hidden state at the last token of a reasoning prefix (AGENTS.md 5.2).
+        """Hidden states of every text layer at the last token of a reasoning prefix.
 
         The input stops at the prefix, so no later reasoning or answer can leak in.
+        Hooks keep only the last token of each layer, because holding whole layers
+        could exceed GPU memory on inputs of about 10,000 tokens.
 
         Args:
             sample: The sample whose reasoning is being read.
             prefix_token_ids: Generated reasoning tokens up to the checkpoint.
 
         Returns:
-            1-D float32 CPU tensor of the text hidden size.
+            float32 CPU tensor of shape [layers + 1, hidden size]. The last row is the
+            normalized final output, the state AGENTS.md 5.2 names as the default.
         """
         self.load()
         inputs, _ = self._prepare_inputs(sample)
         if prefix_token_ids:
             self._append_tokens(inputs, prefix_token_ids)
-        with self._torch.inference_mode():
-            outputs = self.model.model(**inputs, use_cache=False)
-        return outputs.last_hidden_state[0, -1].float().cpu()
+
+        states = []
+
+        def keep_last_token(_module: Any, _args: Any, output: Any) -> None:
+            tensor = output[0] if isinstance(output, tuple) else output
+            states.append(tensor[0, -1].float().cpu())
+
+        layers = self.model.model.language_model.layers
+        handles = [layer.register_forward_hook(keep_last_token) for layer in layers]
+        try:
+            with self._torch.inference_mode():
+                outputs = self.model.model(**inputs, use_cache=False)
+        finally:
+            for handle in handles:
+                handle.remove()
+        states.append(outputs.last_hidden_state[0, -1].float().cpu())
+        return self._torch.stack(states)
 
     def forced_answer(
         self,
@@ -254,8 +282,9 @@ class Qwen3VLRunner:
             )
         else:
             reasoning_prefix = self.processor.decode(prefix_token_ids)
+        thinking = self.config.thinking
         closing = tokenizer(
-            f"\n{self.config.thinking.think_end_text}\n\n", add_special_tokens=False
+            f"\n{thinking.think_end_text}\n\n{thinking.answer_cue}", add_special_tokens=False
         ).input_ids
         self._append_tokens(inputs, list(prefix_token_ids) + closing)
 
@@ -295,17 +324,21 @@ class Qwen3VLRunner:
             },
         )
 
-    def generate_cot(self, sample: InferenceSample) -> InferenceResult:
+    def generate_cot(
+        self, sample: InferenceSample, *, enable_thinking: bool = True
+    ) -> InferenceResult:
         """Run Full CoT generation for one multimodal or text-only sample.
 
         Args:
             sample: Question sample, with an image path or an empty path.
+            enable_thinking: False uses the model's official non-thinking mode, in
+                which it can still explain itself in the visible answer.
 
         Returns:
             InferenceResult with parsed reasoning/answer and token metadata.
         """
         self.load()
-        inputs, image_ref = self._prepare_inputs(sample)
+        inputs, image_ref = self._prepare_inputs(sample, enable_thinking=enable_thinking)
         input_ids, output_token_ids, latency, run_meta = self._generate(inputs)
 
         # Prefer token-ID based segmentation so think tags are not lost when
@@ -317,10 +350,11 @@ class Qwen3VLRunner:
                 clean_up_tokenization_spaces=False,
             )
 
+        think_end_token_id = self._think_end_token_id()
         parsed: ParsedOutput = decode_segments_from_token_ids(
             output_token_ids,
             _decode,
-            think_end_token_id=self.config.thinking.think_end_token_id,
+            think_end_token_id=think_end_token_id,
         )
 
         # Also keep a raw decode of the full generation for auditing.
@@ -337,7 +371,7 @@ class Qwen3VLRunner:
 
         counts = count_reasoning_tokens(
             output_token_ids,
-            think_end_token_id=self.config.thinking.think_end_token_id,
+            think_end_token_id=think_end_token_id,
         )
 
         return InferenceResult(

@@ -17,11 +17,12 @@ dependencies = [
 dev = ["pytest>=8.0"]
 # GPU server extras — install only with approval
 server = [
-    "transformers>=4.57.0",
+    "transformers==5.10.2",
     "accelerate>=0.33.0",
     "huggingface_hub",
     "pycocoevalcap",
     "opencv-python-headless",
+    "scikit-learn",
 ]
 
 [tool.setuptools.packages.find]

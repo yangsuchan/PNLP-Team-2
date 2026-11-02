@@ -68,6 +68,8 @@ class ThinkingConfig:
     think_start_token_id: int = 151667
     think_end_token_id: int = 151668
     think_end_text: str = "</think>"
+    # Placed after the closed think tag when an answer is forced (arXiv 2609.34809).
+    answer_cue: str = "Therefore, the answer is"
 
 
 @dataclass

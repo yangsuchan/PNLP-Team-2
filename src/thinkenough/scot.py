@@ -665,9 +665,14 @@ def is_correct(
     return None
 
 
+def _has_no_think_channel(arm: str) -> bool:
+    """Non-thinking runs never write a think tag, so their whole output is the answer."""
+    return arm.startswith(("no_think", "instruct"))
+
+
 def answer_text(row: dict[str, Any], arm: str) -> str:
-    """The answer to score. Instruct has no think tag, so all of its output counts."""
-    return row["raw_output"] if arm.startswith("instruct") else row["final_answer"]
+    """The answer to score."""
+    return row["raw_output"] if _has_no_think_channel(arm) else row["final_answer"]
 
 
 def summarize_arm(
@@ -695,16 +700,16 @@ def summarize_arm(
             "task": task,
             "arm": arm,
             "n": len(group),
-            "reasoning_tokens_median": 0 if arm.startswith("instruct") else statistics.median(reasoning),
+            "reasoning_tokens_median": 0 if _has_no_think_channel(arm) else statistics.median(reasoning),
             "reasoning_tokens_p90": (
-                0 if arm.startswith("instruct") else reasoning[int(0.9 * (len(reasoning) - 1))]
+                0 if _has_no_think_channel(arm) else reasoning[int(0.9 * (len(reasoning) - 1))]
             ),
             "generated_tokens_median": statistics.median(
                 row["total_generated_token_count"] for row in group
             ),
             "truncated_rate": (
                 0.0
-                if arm.startswith("instruct")
+                if _has_no_think_channel(arm)
                 else sum(row["parse_status"] == "missing_think_end" for row in group) / len(group)
             ),
             "latency_seconds_median": statistics.median(row["latency_seconds"] for row in group),

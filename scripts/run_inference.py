@@ -50,9 +50,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--mode",
-        choices=["full", "direct"],
+        choices=["full", "direct", "no_think"],
         default="full",
-        help="full: generate reasoning. direct: close the think tag and answer at once",
+        help=(
+            "full: generate reasoning. direct: close the think tag and answer at once. "
+            "no_think: the model's own non-thinking mode, where it may still explain"
+        ),
     )
     parser.add_argument(
         "--model-id",
@@ -168,6 +171,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[run] {sample.sample_id} ({config.backend}, {args.mode})")
         if args.mode == "direct":
             result = runner.forced_answer(sample)
+        elif args.mode == "no_think":
+            result = runner.generate_cot(sample, enable_thinking=False)
         else:
             result = runner.generate_cot(sample)
         results.append(result)
