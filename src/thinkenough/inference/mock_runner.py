@@ -20,7 +20,36 @@ class MockRunner:
         self.think_end_token_id = config.thinking.think_end_token_id
         self.think_end_text = config.thinking.think_end_text
 
-    def generate_cot(self, sample: InferenceSample) -> InferenceResult:
+    def forced_answer(
+        self,
+        sample: InferenceSample,
+        reasoning_prefix: str = "",
+        prefix_token_ids: list[int] | None = None,
+    ) -> InferenceResult:
+        """Produce a fake forced answer without reasoning generation."""
+        result = self.generate_cot(sample)
+        result.reasoning_text = reasoning_prefix
+        result.raw_output = result.final_answer
+        result.reasoning_token_count = len(prefix_token_ids or [])
+        result.metadata["forced_answer"] = True
+        return result
+
+    def checkpoints(self, sample, token_ids, lengths, done=frozenset()):
+        """Fake counterpart of the real runner's single pass over a trace."""
+        for index, length in enumerate(lengths):
+            if index not in done:
+                prefix = token_ids[:length]
+                yield index, length, self.extract_hidden_state(sample, prefix), self.forced_answer(sample, prefix_token_ids=prefix)
+
+    def extract_hidden_state(
+        self, sample: InferenceSample, prefix_token_ids: list[int]
+    ) -> list[list[float]]:
+        """Return fixed fake hidden states: three layers of size eight."""
+        return [[float(len(prefix_token_ids))] * 8 for _ in range(3)]
+
+    def generate_cot(
+        self, sample: InferenceSample, *, enable_thinking: bool = True
+    ) -> InferenceResult:
         """Produce a fake Full CoT result for ``sample``.
 
         Args:

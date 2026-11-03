@@ -1,0 +1,32 @@
+# Pilot on SCoT Level 2-3 tasks. Generation defaults match inference_default.yaml.
+backend: qwen3_vl
+
+model:
+  model_id: Qwen/Qwen3.5-9B
+  # Pinned so results stay reproducible if the model repository changes.
+  revision: c202236235762e1c871ad0ccb60c8ee5ba337b9a
+  dtype: bfloat16
+  device_map: auto
+  attn_implementation: null
+
+generation:
+  # The budget of arXiv 2609.34809. Truncated reasoning counts as a missing answer.
+  # The sampling values are the model card's "thinking mode for general tasks".
+  max_new_tokens: 6144
+  do_sample: true
+  temperature: 1.0
+  top_p: 0.95
+  top_k: 20
+  repetition_penalty: 1.0
+  presence_penalty: 1.5
+  seed: 1234
+
+io:
+  output_dir: outputs/pilot
+  save_token_ids: true
+  input_jsonl: data/processed/pilot_text.jsonl
+
+thinking:
+  think_start_token_id: 248068
+  think_end_token_id: 248069
+  think_end_text: "</think>"

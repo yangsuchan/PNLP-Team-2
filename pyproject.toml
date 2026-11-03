@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "thinkenough"
 version = "0.1.0"
-description = "ThinkEnough: Hidden-state probing for early exit in multimodal Long CoT"
+description = "ThinkEnough: when to stop long reasoning in 3D spatial question answering"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -17,8 +17,14 @@ dependencies = [
 dev = ["pytest>=8.0"]
 # GPU server extras — install only with approval
 server = [
-    "transformers>=4.57.0",
+    "transformers==5.10.2",
     "accelerate>=0.33.0",
+    "huggingface_hub",
+    "pycocoevalcap",
+    "opencv-python-headless",
+    "scikit-learn",
+    "bitsandbytes",
+    "flash-linear-attention",
 ]
 
 [tool.setuptools.packages.find]

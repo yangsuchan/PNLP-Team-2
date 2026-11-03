@@ -1,115 +1,154 @@
 # ThinkEnough
 
-**Hidden-State Probing for Dynamic Early Exit in 3D-LLMs**
+**When can long reasoning stop in 3D spatial question answering?**
 
-> Can a 3D-LLM know when it has reasoned enough?
+> Can a frozen model's long reasoning about a 3D scene stop early without losing the answer, and how can we tell when?
 
-ThinkEnough is a course project for **Practical Natural Language Processing** that explores whether a frozen 3D-LLM can dynamically stop Chain-of-Thought (CoT) reasoning once sufficient evidence has been accumulated.
+ThinkEnough is a course project for **Practical Natural Language Processing**. We keep a reasoning model frozen, cut its reasoning every 256 tokens, ask for an answer at that point, and compare rules that decide when to stop.
 
-Instead of retraining the base model with additional SFT or reinforcement learning, we train a lightweight probe on intermediate hidden states to predict whether the model can already produce the correct answer.
-
----
-
-## Motivation
-
-Recent 3D-LLMs use explicit Chain-of-Thought reasoning to solve complex spatial reasoning and planning tasks.
-
-However, full CoT reasoning can increase:
-
-- inference latency
-- generated token cost
-- redundant reasoning steps
-- the risk of overthinking
-
-Moreover, different 3D queries may require different amounts of reasoning.
-
-This leads to our main question:
-
-> **Can the hidden states of a frozen 3D-LLM reveal when its current reasoning is already sufficient to answer correctly?**
+Perception is out of scope. We assume other modules turn a scan into an object list, and we study the spatial reasoning that follows.
 
 ---
 
-## Research Questions
+## Data
 
-### RQ1 — Reasoning Sufficiency
+Questions, references, and splits come from [SCoT](https://huggingface.co/datasets/Orange-zZZ/SCoT) (ICLR 2026). The SCoT validation set is divided in half by scene into a tuning half and a final half. All results so far use the tuning half only.
 
-Do hidden states of a frozen 3D-LLM encode whether the current reasoning is sufficient to answer correctly?
+| Task | Questions | Answer | Metrics |
+|---|---:|---|---|
+| Relationship Analysis | 100 | Distance and direction | Distance within 0.2 m (added by us), ROUGE-L, METEOR, SCoT scores |
+| Implicit Detection | 100 | Object id | Acc@0.25, Acc@0.50 |
+| Situated Planning | 50 | Free text | ROUGE-L, METEOR, SCoT scores |
+| Un-situated Planning | 50 | Free text | ROUGE-L, METEOR, SCoT scores |
 
-### RQ2 — Efficient Early Exit
+Relationship uses only the questions that ask for a distance.
 
-Can a lightweight probe use this signal to reduce reasoning cost while preserving task performance?
+Each question gets the Mask3D object list as text, scene video frames at 2 fps, a top-down scene image, and the question. Scene videos come from [VSI-Bench](https://huggingface.co/datasets/nyu-visionx/VSI-Bench), and object lists from [Chat-Scene](https://huggingface.co/ZzZZCHS/Chat-Scene).
 
----
+## Model
 
-## Method Overview
+`Qwen/Qwen3.5-9B`, revision `c202236235762e1c871ad0ccb60c8ee5ba337b9a`, with the model card's settings: temperature 1.0, top_p 0.95, top_k 20, presence_penalty 1.5, and up to 32,768 new tokens. `transformers` has no presence penalty, so we implement it as vLLM does.
 
-The overall pipeline is:
+## Method
 
 ```text
-3D Scene + Question
+Object list + video + image + question
         |
         v
-Frozen Reasoning-capable 3D-LLM
+Frozen model, in three conditions: direct / thinking off / full thinking
         |
         v
-Reasoning Checkpoint t
+Every 256 reasoning tokens: forced answer + hidden states of all layers
         |
         v
-Hidden State h_t
-        |
-        v
-ThinkEnough Probe
-        |
-   +----+----+
-   |         |
-CONTINUE    STOP
-   |         |
-   v         v
-Next Step   Final Answer
+Stopping rules, evaluated on scenes they were not trained on
 ```
 
----
+**Conditions:** `direct` answers right after the cue "Therefore, the answer is". `no_think` turns thinking off. `full` reasons until it finishes.
 
-## Model Inference (Phase 0)
+**Stopping rules:**
 
-Base model: `Qwen/Qwen3-VL-8B-Thinking` (frozen).  
-Local machines (e.g. 8GB VRAM) should use the **mock** backend. Full model inference is intended for a GPU server (e.g. RTX 4090 24GB) after explicit approval.
+- Fixed token caps
+- Answer stability: stop once the forced answer repeats 2 or 3 times
+- First right answer: needs the true answer, so it only bounds accuracy
+- Readiness detector: a linear classifier on the hidden state, its change, and the share of tokens used, following [arXiv 2609.34809](https://arxiv.org/abs/2609.34809)
+- Variants of the detector that read tokens only, hidden states only, or text-based progress
+- Evidence detector: reads whether the forced answer has settled and whether the reasoning so far backs it, with no hidden states
 
-### Setup (local, no model weights)
+**Free-text grading:** SCoT's scoring prompt on a local judge, `unsloth/gemma-3-27b-it-bnb-4bit`, chosen from [arXiv 2510.09738](https://arxiv.org/abs/2510.09738). Scores are compared only within one judge. The judge also supports the RAGAS Answer Accuracy metric.
+
+## Preliminary results
+
+Tuning half, one seed. These are early numbers, not final results.
+
+| Task | Direct | No think | Full |
+|---|---:|---:|---:|
+| Relationship, distance within 0.2 m | 21% | 22% | 88% |
+| Implicit, Acc@0.25 | 21% | 19% | 31% |
+| Situated, judge mean (1-10) | 4.20 | 7.19 | 8.6 |
+| Un-situated, judge mean (1-10) | 5.64 | 7.37 | 8.8 |
+
+**Known limits of these numbers:**
+
+- They were produced before a fix in `to_scan_frame`, which left object sizes along the original axes. Rerunning Implicit with fixed sizes changed direct and no-think accuracy by less than repeat-run noise (25.5→23.0% and 15.0→12.0%, over two seeds).
+- Implicit varies with the seed: direct gave 21% and 30%, and no-think 19% and 11%.
+- Implicit uses a wider id parser than SCoT's evaluator, which gives 15%, 8%, and 19%.
+- Answer parsers were corrected after results were seen. They never read the correct answer.
+- The judge is not validated against human grading.
+
+## Setup
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+PYTHONPATH=src pytest tests/ -q
 ```
 
-### Mock inference (safe default)
+This needs no GPU. To check the pipeline without model weights:
 
 ```bash
 python scripts/run_inference.py --config configs/inference_default.yaml --backend mock
 ```
 
-Outputs are written under `outputs/` as per-sample JSON and a combined JSONL file.
+A real run needs a 24 GB GPU and the server dependencies listed in `requirements.txt`. METEOR needs Java.
 
-### Unit tests
-
-```bash
-PYTHONPATH=src pytest tests/ -q
-```
-
-### GPU server checklist (do not run locally without approval)
-
-1. Install server deps: `torch` (CUDA build), `transformers>=4.57.0`, `accelerate`
-2. Confirm GPU / VRAM (`nvidia-smi`)
-3. Download `Qwen/Qwen3-VL-8B-Thinking` weights
-4. Run a single sample:
+## Running an experiment
 
 ```bash
-python scripts/run_inference.py \
-  --config configs/inference_default.yaml \
-  --backend qwen3_vl \
-  --input data/samples/example_inputs.jsonl \
-  --max-samples 1
+# Build inputs (downloads SCoT data, frames, and scene images)
+python scripts/build_scot_inputs.py --tasks implicit_detection --per-task 100 --mixed-order \
+  --video-dir data/raw/frames_2fps --image-dir data/raw/scene_images --out data/processed/implicit.jsonl
+
+# Three conditions
+for mode in direct no_think full; do
+  python scripts/run_inference.py --config configs/pilot.yaml --mode $mode --max-new-tokens 32768 \
+    --input data/processed/implicit.jsonl --output-dir outputs/implicit/$mode
+done
+
+# Forced answers and hidden states along the full reasoning
+python scripts/collect_checkpoints.py --config configs/pilot.yaml --input data/processed/implicit.jsonl \
+  --runs outputs/implicit/full --output-dir outputs/implicit/checkpoints
+
+# Stopping rules and detectors
+python scripts/analyze_checkpoints.py --collected outputs/implicit/checkpoints --runs outputs/implicit/full \
+  --detector --folds 5 --strengths 0.0001 0.001 0.01 0.1 1 --out outputs/implicit/stopping.json
 ```
 
-5. Verify `</think>` / token id `151668` appears in outputs and that JSONL fields match the mock schema
+For Relationship, add `--distance-only` when building inputs. For Planning, grade the answers and use the scores as labels:
+
+```bash
+python scripts/judge_answers.py --runs outputs/planning --out outputs/planning/judge.jsonl
+python scripts/judge_answers.py --runs outputs/planning --forced outputs/planning/checkpoints/checkpoints.jsonl \
+  --out outputs/planning/judge_forced.jsonl
+python scripts/analyze_checkpoints.py --collected outputs/planning/checkpoints --runs outputs/planning/full \
+  --official-labels outputs/planning/judge_forced.jsonl --margin 1 --score-drop 1 \
+  --detector --folds 5 --strengths 0.0001 0.001 0.01 0.1 1 --out outputs/planning/stopping.json
+```
+
+To compare rules with thresholds picked from all training questions, including the evidence detector and forced-answer costs:
+
+```bash
+python scripts/compare_stopping_rules.py --collected outputs/implicit/checkpoints --runs outputs/implicit/full \
+  --task implicit_detection --report outputs/implicit/stopping.json --out outputs/implicit/comparison.json
+```
+
+Runs resume from where they stopped. Use a new output folder when you change the question count.
+
+## Repository
+
+| Path | Purpose |
+|---|---|
+| `src/thinkenough/scot.py` | SCoT tasks, inputs, answer parsing, metrics |
+| `src/thinkenough/inference/` | Model runners, including forced answers along a reasoning trace |
+| `src/thinkenough/checkpoints.py` | Stopping rules and paired comparisons |
+| `src/thinkenough/detector.py` | Readiness detector and scene-separated evaluation |
+| `src/thinkenough/claims.py` | Checks spatial claims in reasoning against the object list |
+| `src/thinkenough/evidence.py` | Features from the forced answer and the reasoning so far |
+| `src/thinkenough/judge.py` | Scoring prompts for free-text answers |
+| `scripts/` | Command-line steps above |
+| `configs/pilot.yaml` | Settings for the experiments |
+
+## Credits
+
+Answer cleaning and the scoring prompt come from [SCoT](https://github.com/WHU-USI3DV/SCoT). The Answer Accuracy prompts come from [RAGAS](https://github.com/explodinggradients/ragas).

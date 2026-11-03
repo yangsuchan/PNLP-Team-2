@@ -13,7 +13,7 @@ import yaml
 class ModelConfig:
     """Base model loading settings (frozen inference only)."""
 
-    model_id: str = "Qwen/Qwen3-VL-8B-Thinking"
+    model_id: str = "Qwen/Qwen3.5-9B"
     revision: str | None = None
     dtype: str = "bfloat16"
     device_map: str = "auto"
@@ -31,6 +31,7 @@ class GenerationConfig:
     top_k: int = 20
     repetition_penalty: float = 1.0
     presence_penalty: float = 0.0
+    num_beams: int = 1
     seed: int = 1234
 
     def to_dict(self) -> dict[str, Any]:
@@ -42,6 +43,7 @@ class GenerationConfig:
             "top_k": self.top_k,
             "repetition_penalty": self.repetition_penalty,
             "presence_penalty": self.presence_penalty,
+            "num_beams": self.num_beams,
             "seed": self.seed,
         }
 
@@ -57,15 +59,16 @@ class IOConfig:
 
 @dataclass
 class ThinkingConfig:
-    """Qwen3-VL Thinking special-token settings.
+    """Special-token settings for thinking models.
 
-    Values come from the official tokenizer_config.json for
-    Qwen/Qwen3-VL-8B-Thinking. Do not invent alternate markers.
+    The ids are fallbacks for mock runs. The real runner reads them from the model's tokenizer.
     """
 
     think_start_token_id: int = 151667
     think_end_token_id: int = 151668
     think_end_text: str = "</think>"
+    # Placed after the closed think tag when an answer is forced (arXiv 2609.34809).
+    answer_cue: str = "Therefore, the answer is"
 
 
 @dataclass

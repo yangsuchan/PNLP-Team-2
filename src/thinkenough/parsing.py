@@ -1,4 +1,4 @@
-"""Parse Qwen3-VL Thinking model outputs into reasoning and final answer.
+"""Parse a thinking model's output into reasoning and final answer.
 
 Confirmed format (Hugging Face tokenizer / chat template):
 - Thinking models prepend the think-start marker in the *prompt*.
@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from thinkenough.schemas import ParsedOutput, TokenCounts
 
-# Official Qwen3-VL-8B-Thinking think-end text / token id.
+# Fallbacks for mock runs; the real runner passes the id from the tokenizer.
 DEFAULT_THINK_END_TEXT = "</think>"
 DEFAULT_THINK_END_TOKEN_ID = 151668
 

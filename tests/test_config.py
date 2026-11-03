@@ -13,7 +13,7 @@ DEFAULT_CONFIG = REPO_ROOT / "configs" / "inference_default.yaml"
 def test_load_default_config():
     cfg = load_inference_config(DEFAULT_CONFIG, repo_root=REPO_ROOT)
     assert cfg.backend == "mock"
-    assert cfg.model.model_id == "Qwen/Qwen3-VL-8B-Thinking"
+    assert cfg.model.model_id == "Qwen/Qwen3.5-9B"
     assert cfg.model.dtype == "bfloat16"
     assert cfg.generation.max_new_tokens == 40960
     assert cfg.generation.temperature == 1.0
