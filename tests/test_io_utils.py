@@ -19,7 +19,7 @@ SAMPLE_JSONL = REPO_ROOT / "data" / "samples" / "example_inputs.jsonl"
 def _make_result(sample_id: str = "t1") -> InferenceResult:
     return InferenceResult(
         sample_id=sample_id,
-        model_name="mock::Qwen/Qwen3-VL-8B-Thinking",
+        model_name="mock::Qwen/Qwen3.5-9B",
         model_revision=None,
         dtype="bfloat16",
         image_path="data/samples/sample_image.png",

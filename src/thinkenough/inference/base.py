@@ -6,7 +6,7 @@ in later phases without changing the Full CoT result schema.
 
 from __future__ import annotations
 
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable, Iterator
 
 from thinkenough.config import InferenceConfig
 from thinkenough.schemas import InferenceResult, InferenceSample
@@ -47,6 +47,16 @@ class ModelRunner(Protocol):
         self, sample: InferenceSample, prefix_token_ids: list[int]
     ) -> Any:
         """Hidden states of every text layer at the last token of a reasoning prefix."""
+        ...
+
+    def checkpoints(
+        self,
+        sample: InferenceSample,
+        token_ids: list[int],
+        lengths: list[int],
+        done: frozenset[int] = frozenset(),
+    ) -> Iterator[tuple[int, int, Any, InferenceResult]]:
+        """Yield index, length, hidden states, and forced answer for each length not in ``done``."""
         ...
 
 

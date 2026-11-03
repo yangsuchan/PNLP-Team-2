@@ -55,6 +55,8 @@ def load_samples_jsonl(path: str | Path) -> list[InferenceSample]:
                     question=str(obj["question"]),
                     metadata=dict(obj.get("metadata") or {}),
                     video_path=str(obj.get("video_path") or ""),
+                    extra_image_paths=[str(path) for path in obj.get("extra_image_paths") or []],
+                    system=str(obj.get("system") or ""),
                 )
             )
     return samples

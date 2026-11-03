@@ -1,7 +1,7 @@
-"""Qwen3-VL-8B-Thinking Full CoT runner (Hugging Face Transformers).
+"""Runner for Qwen vision-language models with thinking (Hugging Face Transformers).
 
-Implements the official quickstart from:
-https://huggingface.co/Qwen/Qwen3-VL-8B-Thinking
+The experiments use Qwen/Qwen3.5-9B. The backend keeps the name qwen3_vl, which also appears in
+result file names.
 
 WARNING:
 - Do not run this on the local 8GB VRAM machine for full BF16 inference.
@@ -11,9 +11,10 @@ WARNING:
 
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from thinkenough.config import InferenceConfig
 from thinkenough.parsing import (
@@ -45,8 +46,26 @@ def _resolve_torch_dtype(dtype_name: str):
     return mapping[dtype_name]
 
 
+class PresencePenalty:
+    """Lower the score of every token already generated, as vLLM's presence_penalty does.
+
+    The model card recommends this for thinking mode, but transformers has no such option.
+    Prompt tokens do not count. It runs before temperature and top-k, also as in vLLM.
+    """
+
+    def __init__(self, penalty: float, prompt_length: int) -> None:
+        self.penalty = penalty
+        self.prompt_length = prompt_length
+
+    def __call__(self, input_ids: Any, scores: Any) -> Any:
+        seen = input_ids[:, self.prompt_length :]
+        if seen.shape[1] == 0:
+            return scores
+        return scores.scatter(1, seen, scores.gather(1, seen) - self.penalty)
+
+
 class Qwen3VLRunner:
-    """Frozen Qwen3-VL Thinking runner: Full CoT, forced answers, and hidden states."""
+    """Frozen thinking-model runner: Full CoT, forced answers, and hidden states."""
 
     def __init__(self, config: InferenceConfig) -> None:
         self.config = config
@@ -122,6 +141,7 @@ class Qwen3VLRunner:
                     raise FileNotFoundError(f"Image not found: {image_ref}")
 
         video_frames = None
+        processor_options: dict[str, Any] = {}
         if sample.video_path:
             folder = self.config.resolve_path(sample.video_path)
             video_frames = sorted(str(p) for p in folder.glob("*.jpg"))
@@ -129,9 +149,19 @@ class Qwen3VLRunner:
                 raise FileNotFoundError(f"No video frames in: {folder}")
             # Frames are already sampled; the processor must keep all of them.
             self.processor.video_processor.do_sample_frames = False
+            # Without real timing the processor writes wrong frame times into the prompt.
+            timing = json.loads((folder / "frames.json").read_text(encoding="utf-8"))
+            if len(timing["frames_indices"]) != len(video_frames):
+                raise ValueError(f"Frame count does not match frames.json in: {folder}")
+            processor_options = {"processor_kwargs": {"video_metadata": [timing]}}
+
+        extra_images = [str(self.config.resolve_path(path)) for path in sample.extra_image_paths]
+        missing = [path for path in extra_images if not Path(path).exists()]
+        if missing:
+            raise FileNotFoundError(f"Image not found: {missing[0]}")
 
         messages = build_qwen3_vl_messages(
-            sample, image_path=image_ref or "", video_frames=video_frames
+            sample, image_path=image_ref or "", video_frames=video_frames, extra_images=extra_images
         )
         template_options = {} if enable_thinking else {"enable_thinking": False}
         inputs = self.processor.apply_chat_template(
@@ -141,11 +171,12 @@ class Qwen3VLRunner:
             return_dict=True,
             return_tensors="pt",
             **template_options,
+            **processor_options,
         )
         # Match official docs / HF model_doc guidance.
         inputs.pop("token_type_ids", None)
         if not enable_thinking and self._think_end_token_id() not in inputs["input_ids"][0][-4:].tolist():
-            # Qwen3-VL's template ignores this option and would think anyway.
+            # Some templates ignore this option and would think anyway.
             raise ValueError(
                 f"{self.config.model.model_id} has no non-thinking mode. "
                 "Use its Instruct model instead."
@@ -162,34 +193,31 @@ class Qwen3VLRunner:
             "top_p": gen_cfg.top_p,
             "top_k": gen_cfg.top_k,
             "repetition_penalty": gen_cfg.repetition_penalty,
+            # The repository has no generation_config.json, so generate would stop only at the second.
+            "eos_token_id": self.processor.tokenizer.convert_tokens_to_ids(["<|im_end|>", "<|endoftext|>"]),
         }
         if gen_cfg.num_beams > 1:
             generate_kwargs["num_beams"] = gen_cfg.num_beams
-        # presence_penalty: supported in recent transformers GenerationConfig.
-        # If the installed version rejects it, retry without it and record a note.
-        generate_kwargs["presence_penalty"] = gen_cfg.presence_penalty
+        if gen_cfg.presence_penalty:
+            from transformers import LogitsProcessorList
+
+            generate_kwargs["logits_processor"] = LogitsProcessorList(
+                [PresencePenalty(gen_cfg.presence_penalty, inputs["input_ids"].shape[1])]
+            )
 
         has_cuda = self._torch.cuda.is_available()
         if has_cuda:
             self._torch.cuda.reset_peak_memory_stats()
 
         started = time.perf_counter()
-        presence_penalty_applied = True
         with self._torch.inference_mode():
-            try:
-                generated = self.model.generate(**inputs, **generate_kwargs)
-            except (TypeError, ValueError) as exc:
-                if "presence_penalty" not in str(exc):
-                    raise
-                generate_kwargs.pop("presence_penalty", None)
-                presence_penalty_applied = False
-                generated = self.model.generate(**inputs, **generate_kwargs)
+            generated = self.model.generate(**inputs, **generate_kwargs)
         latency = time.perf_counter() - started
 
         input_ids = inputs["input_ids"][0].tolist()
         output_token_ids = generated[0].tolist()[len(input_ids) :]
         run_meta = {
-            "presence_penalty_applied": presence_penalty_applied,
+            "presence_penalty_applied": bool(gen_cfg.presence_penalty),
             "peak_vram_gb": (
                 self._torch.cuda.max_memory_allocated() / 1e9 if has_cuda else None
             ),
@@ -289,6 +317,21 @@ class Qwen3VLRunner:
         self._append_tokens(inputs, list(prefix_token_ids) + closing)
 
         input_ids, output_token_ids, latency, run_meta = self._generate(inputs)
+        return self._forced_result(
+            sample, image_ref, reasoning_prefix, len(prefix_token_ids), input_ids, output_token_ids, latency, run_meta
+        )
+
+    def _forced_result(
+        self,
+        sample: InferenceSample,
+        image_ref: Any,
+        reasoning_prefix: str,
+        prefix_length: int,
+        input_ids: list[int],
+        output_token_ids: list[int],
+        latency: float,
+        run_meta: dict[str, Any],
+    ) -> InferenceResult:
         answer = self.processor.decode(
             output_token_ids,
             skip_special_tokens=True,
@@ -311,7 +354,7 @@ class Qwen3VLRunner:
             final_answer=answer,
             input_token_ids=input_ids,
             output_token_ids=output_token_ids,
-            reasoning_token_count=len(prefix_token_ids),
+            reasoning_token_count=prefix_length,
             answer_token_count=len(output_token_ids),
             total_generated_token_count=len(output_token_ids),
             latency_seconds=latency,
@@ -323,6 +366,102 @@ class Qwen3VLRunner:
                 "peak_vram_gb": run_meta["peak_vram_gb"],
             },
         )
+
+    def checkpoints(
+        self,
+        sample: InferenceSample,
+        token_ids: list[int],
+        lengths: list[int],
+        done: frozenset[int] = frozenset(),
+        chunk_size: int = 512,
+    ) -> Iterator[tuple[int, int, Any, InferenceResult]]:
+        """Walk one reasoning trace once, with hidden states and a forced answer at each length.
+
+        Reading the whole prompt and prefix at once for every checkpoint runs out of memory on
+        long traces, so the prompt is read once and the reasoning is fed in small chunks through
+        the cache. After each forced answer the cache is rolled back: full-attention layers are
+        cropped, and linear-attention layers get their saved states back.
+
+        Args:
+            sample: The sample whose reasoning is being read.
+            token_ids: Generated reasoning tokens.
+            lengths: Increasing prefix lengths to stop at.
+            done: Indices of ``lengths`` that are already saved, so they are only passed through.
+            chunk_size: Tokens per forward pass.
+
+        Yields:
+            Index into ``lengths``, the length, [layers + 1, hidden size] float32 CPU states as in
+            ``extract_hidden_state``, and the forced answer.
+        """
+        self.load()
+        torch = self._torch
+        inputs, image_ref = self._prepare_inputs(sample)
+        thinking = self.config.thinking
+        closing = self.processor.tokenizer(
+            f"\n{thinking.think_end_text}\n\n{thinking.answer_cue}", add_special_tokens=False
+        ).input_ids
+        device = self.model.device
+        ids, mask = inputs["input_ids"], inputs["attention_mask"]
+        states: list[Any] = []
+
+        def keep_last_token(_module: Any, _args: Any, output: Any) -> None:
+            tensor = output[0] if isinstance(output, tuple) else output
+            states.append(tensor[0, -1].float().cpu())
+
+        def feed(new_ids: list[int], cache: Any) -> tuple[Any, Any, Any]:
+            extra = torch.tensor([new_ids], dtype=ids.dtype, device=device)
+            longer_ids = torch.cat([current["ids"], extra], dim=1)
+            longer_mask = torch.cat([current["mask"], torch.ones_like(extra)], dim=1)
+            # No mask here: with one the model builds positions for the whole sequence, not this chunk.
+            output = self.model.model(input_ids=extra, past_key_values=cache, use_cache=True)
+            return output, longer_ids, longer_mask
+
+        layers = self.model.model.language_model.layers
+        with torch.inference_mode():
+            cache = self.model.model(**inputs, use_cache=True).past_key_values
+            current = {"ids": ids, "mask": mask}
+            position = 0
+            for index, length in enumerate(lengths):
+                while position < length:
+                    step = min(length - position, chunk_size)
+                    last = position + step == length
+                    handles = [layer.register_forward_hook(keep_last_token) for layer in layers] if last else []
+                    states.clear()
+                    try:
+                        output, current["ids"], current["mask"] = feed(token_ids[position : position + step], cache)
+                    finally:
+                        for handle in handles:
+                            handle.remove()
+                    position += step
+                if index in done:
+                    continue
+                hidden = torch.stack([*states, output.last_hidden_state[0, -1].float().cpu()])
+
+                saved = [
+                    (layer, layer.conv_states.clone(), layer.recurrent_states.clone())
+                    for layer in cache.layers
+                    if getattr(layer, "is_conv_states_initialized", False)
+                ]
+                kept_length = cache.get_seq_length()
+                walked = dict(current)
+                if len(closing) > 1:  # generate needs one token it has not seen.
+                    _, current["ids"], current["mask"] = feed(closing[:-1], cache)
+                extra = torch.tensor([closing[-1:]], dtype=ids.dtype, device=device)
+                forced_inputs = {
+                    "input_ids": torch.cat([current["ids"], extra], dim=1),
+                    "attention_mask": torch.cat([current["mask"], torch.ones_like(extra)], dim=1),
+                    "past_key_values": cache,
+                }
+                input_ids, output_ids, latency, run_meta = self._generate(forced_inputs)
+                result = self._forced_result(
+                    sample, image_ref, self.processor.decode(token_ids[:length]), length, input_ids, output_ids, latency, run_meta
+                )
+                cache.crop(kept_length)
+                for layer, conv_state, recurrent_state in saved:
+                    layer.conv_states.copy_(conv_state)
+                    layer.recurrent_states.copy_(recurrent_state)
+                current.update(walked)
+                yield index, length, hidden, result
 
     def generate_cot(
         self, sample: InferenceSample, *, enable_thinking: bool = True

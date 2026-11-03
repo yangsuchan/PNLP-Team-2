@@ -16,4 +16,6 @@ pytest>=8.0
 # scikit-learn               # the linear answer-readiness detector
 # huggingface_hub            # SCoT files and scene attributes
 # pycocoevalcap              # ROUGE-L and METEOR as in SCoT; METEOR needs Java
+# bitsandbytes               # the 4-bit judge model
+# flash-linear-attention     # fast path for Qwen3.5; it falls back to a slower one without this
 # ---------------------------------------------------------------------------

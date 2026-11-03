@@ -24,6 +24,8 @@ class InferenceSample:
         image_path: Local path or URL to the input image.
         question: Text question paired with the image.
         video_path: Optional folder of sampled video frames, shown in name order.
+        extra_image_paths: Optional images shown after ``image_path``, in list order.
+        system: Optional system message.
         metadata: Optional free-form fields (dataset split, etc.).
     """
 
@@ -32,6 +34,8 @@ class InferenceSample:
     question: str
     metadata: dict[str, Any] = field(default_factory=dict)
     video_path: str = ""
+    extra_image_paths: list[str] = field(default_factory=list)
+    system: str = ""
 
 
 @dataclass

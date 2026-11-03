@@ -25,6 +25,7 @@ class Checkpoint:
     correct: bool
     missing: bool = False
     row: dict[str, Any] = field(default_factory=dict)
+    score: float | None = None  # For tasks graded by score rather than right or wrong.
 
 
 @dataclass
@@ -37,6 +38,8 @@ class QuestionTrace:
     full_correct: bool
     full_missing: bool
     checkpoints: list[Checkpoint] = field(default_factory=list)
+    full_score: float | None = None
+    full_answer_tokens: int | None = None
 
 
 @dataclass
@@ -47,14 +50,15 @@ class Outcome:
     correct: bool
     missing: bool
     stopped_at: int | None  # Checkpoint index, or None for running to the end.
+    score: float | None = None
 
 
 def run_rule(trace: QuestionTrace, stop_index: int | None) -> Outcome:
     """Outcome of stopping at a checkpoint, or of full thinking when ``stop_index`` is None."""
     if stop_index is None:
-        return Outcome(trace.full_tokens, trace.full_correct, trace.full_missing, None)
+        return Outcome(trace.full_tokens, trace.full_correct, trace.full_missing, None, trace.full_score)
     checkpoint = trace.checkpoints[stop_index]
-    return Outcome(checkpoint.tokens, checkpoint.correct, checkpoint.missing, stop_index)
+    return Outcome(checkpoint.tokens, checkpoint.correct, checkpoint.missing, stop_index, checkpoint.score)
 
 
 def fixed_cap(trace: QuestionTrace, cap: int) -> Outcome:
@@ -66,10 +70,33 @@ def fixed_cap(trace: QuestionTrace, cap: int) -> Outcome:
     return run_rule(trace, index)
 
 
+def oracle_give_up(trace: QuestionTrace) -> Outcome:
+    """Bound on savings: also stop questions that are never right at their first checkpoint."""
+    outcome = oracle(trace)
+    if not outcome.correct and trace.checkpoints:
+        return run_rule(trace, 0)
+    return outcome
+
+
 def oracle(trace: QuestionTrace) -> Outcome:
-    """Upper bound: stop at the first correct checkpoint, which needs the true answer."""
+    """Bound on accuracy: stop at the first correct checkpoint, which needs the true answer.
+
+    Questions that are never right run to the end, so this does not bound token savings.
+    """
     for position, checkpoint in enumerate(trace.checkpoints):
         if checkpoint.correct:
+            return run_rule(trace, position)
+    return run_rule(trace, None)
+
+
+def answer_stable(trace: QuestionTrace, keys: Sequence[Any], repeats: int) -> Outcome:
+    """Baseline without a Probe: stop once the forced answer has stayed the same ``repeats`` times.
+
+    ``keys`` holds each checkpoint's answer in comparable form, or None if it has none.
+    """
+    for position in range(repeats - 1, len(keys)):
+        window = keys[position - repeats + 1 : position + 1]
+        if window[0] is not None and len(set(window)) == 1:
             return run_rule(trace, position)
     return run_rule(trace, None)
 
@@ -96,7 +123,26 @@ def summarize(traces: Sequence[QuestionTrace], rule: Callable[[QuestionTrace], O
     tokens = sum(o.tokens for o in outcomes)
     full_tokens = sum(t.full_tokens for t in traces)
     change_low, change_high = bootstrap_mean_ci([c - f for c, f in zip(correct, full)])
+    scored = {}
+    if traces and traces[0].full_score is not None:
+        score_changes = [o.score - t.full_score for o, t in zip(outcomes, traces)]
+        scored = {
+            "score_mean": sum(o.score for o in outcomes) / len(outcomes),
+            "score_full_mean": sum(t.full_score for t in traces) / len(traces),
+            "score_change_ci": list(bootstrap_mean_ci(score_changes)),
+        }
+    if traces and all(t.full_answer_tokens is not None for t in traces):
+        # Everything generated, so a stopped question also pays for the answer it ends with.
+        total = sum(
+            o.tokens + (t.checkpoints[o.stopped_at].row["answer_tokens"] if o.stopped_at is not None else t.full_answer_tokens)
+            for o, t in zip(outcomes, traces)
+        )
+        full_total = sum(t.full_tokens + t.full_answer_tokens for t in traces)
+        scored["total_tokens_mean"] = total / len(traces)
+        scored["total_tokens_full_mean"] = full_total / len(traces)
+        scored["total_reduction"] = 1 - total / full_total if full_total else 0.0
     return {
+        **scored,
         "n": len(traces),
         "accuracy": sum(correct) / len(correct),
         "accuracy_full": sum(full) / len(full),

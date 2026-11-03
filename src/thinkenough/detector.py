@@ -25,16 +25,15 @@ def checkpoint_features(
     trace: QuestionTrace,
     budget: int,
 ) -> np.ndarray:
-    """One row of [h, d, t/B] per checkpoint.
+    """One row of [h, d, t/B] per checkpoint. As in the paper, the state before the first is zero.
 
     Args:
-        hidden: Returns the hidden state at a checkpoint index, or at the start of
-            reasoning for None.
+        hidden: Returns the hidden state at a checkpoint index.
         trace: The question.
         budget: Token budget B.
     """
     rows = []
-    previous = hidden(trace, None)
+    previous = 0.0
     for index, checkpoint in enumerate(trace.checkpoints):
         current = hidden(trace, index)
         rows.append(np.concatenate([current, current - previous, [checkpoint.tokens / budget]]))
@@ -48,10 +47,10 @@ class ReadinessDetector:
     Standardization and class weights come only from the training checkpoints.
     """
 
-    def __init__(self, seed: int = 0) -> None:
+    def __init__(self, seed: int = 0, strength: float = 1.0) -> None:
         from sklearn.linear_model import LogisticRegression
 
-        self.model = LogisticRegression(class_weight="balanced", max_iter=2000, random_state=seed)
+        self.model = LogisticRegression(class_weight="balanced", C=strength, max_iter=2000, random_state=seed)
         self.mean: np.ndarray | None = None
         self.scale: np.ndarray | None = None
 
@@ -80,16 +79,27 @@ def choose_threshold(
     scores: Sequence[Sequence[float]],
     *,
     allowed_accuracy_drop: float = 0.005,
+    allowed_score_drop: float | None = None,
 ) -> float:
-    """Threshold with the fewest mean tokens within the allowed accuracy drop from full thinking."""
+    """Threshold with the fewest mean tokens within the allowed drop from full thinking.
+
+    With ``allowed_score_drop``, the limit is on the mean score instead of accuracy.
+    """
     full_accuracy = sum(t.full_correct for t in traces) / len(traces)
+    full_score = sum(t.full_score for t in traces) / len(traces) if allowed_score_drop is not None else None
     candidates = sorted({float(s) for group in scores for s in group}) + [float("inf")]
     best_threshold, best_tokens = float("inf"), None
     for threshold in candidates:
         outcomes = [stop_at_threshold(t, s, threshold) for t, s in zip(traces, scores)]
         accuracy = sum(o.correct for o in outcomes) / len(outcomes)
         tokens = sum(o.tokens for o in outcomes)
-        if accuracy >= full_accuracy - allowed_accuracy_drop and (best_tokens is None or tokens < best_tokens):
+        within = (
+            accuracy >= full_accuracy - allowed_accuracy_drop
+            if allowed_score_drop is None
+            else sum(o.score for o in outcomes) / len(outcomes) >= full_score - allowed_score_drop
+        )
+        # Equal tokens keep the higher threshold, so a tie on validation does not push test questions to stop early.
+        if within and (best_tokens is None or tokens <= best_tokens):
             best_threshold, best_tokens = threshold, tokens
     return best_threshold
 
@@ -99,10 +109,9 @@ def auroc(labels: np.ndarray, scores: np.ndarray) -> float:
     positive, negative = scores[labels == 1], scores[labels == 0]
     if len(positive) == 0 or len(negative) == 0:
         return 0.5
-    order = np.argsort(np.concatenate([positive, negative]), kind="stable")
-    ranks = np.empty(len(order))
-    ranks[order] = np.arange(1, len(order) + 1)
-    return float((ranks[: len(positive)].sum() - len(positive) * (len(positive) + 1) / 2) / (len(positive) * len(negative)))
+    from sklearn.metrics import roc_auc_score
+
+    return float(roc_auc_score(labels, scores))  # Counts ties as half, unlike a plain sort.
 
 
 def labels_of(traces: Sequence[QuestionTrace]) -> np.ndarray:
@@ -114,45 +123,60 @@ def two_fold_evaluate(
     hidden_at_layer: Callable[[int], Callable[[QuestionTrace, int | None], np.ndarray]],
     layers: Sequence[int],
     budget: int,
+    features: Callable[..., np.ndarray] = checkpoint_features,
+    layer_by_fold: dict[int, int] | None = None,
+    folds: int = 2,
+    strengths: Sequence[float] = (1.0,),
+    allowed_score_drop: float | None = None,
 ) -> list[dict[str, Any]]:
     """Train on one scene fold and test on the other, in both directions.
 
     Within the training fold, a scene-separated validation part picks the layer and the
     threshold. Returns the per-question outcomes and choices of each direction.
+
+    Args:
+        features: Builds a question's rows from (hidden, trace, budget).
+        layer_by_fold: Use these layers instead of searching, so variants compare fairly.
+        folds: Scene folds. The paper uses 2 with hundreds of questions; few questions need more.
+        strengths: Inverse regularization values to try on validation. Few questions and thousands
+            of features overfit without stronger regularization.
     """
     results = []
-    for test_fold in (0, 1):
-        test = [t for t in traces if fold_of(t.scene_id) == test_fold]
-        rest = [t for t in traces if fold_of(t.scene_id) != test_fold]
+    for test_fold in range(folds):
+        test = [t for t in traces if fold_of(t.scene_id, folds) == test_fold]
+        rest = [t for t in traces if fold_of(t.scene_id, folds) != test_fold]
         validation = [t for t in rest if fold_of(t.scene_id, 5, "validation") == 0]
         train = [t for t in rest if fold_of(t.scene_id, 5, "validation") != 0]
         if not test or not train or not validation:
             raise ValueError("Each fold needs scenes for training, validation, and testing")
 
         def stacked(group: Sequence[QuestionTrace], hidden: Callable) -> np.ndarray:
-            parts = [f for f in (checkpoint_features(hidden, t, budget) for t in group) if len(f)]
+            parts = [f for f in (features(hidden, t, budget) for t in group) if len(f)]
             return np.concatenate(parts) if parts else np.zeros((0, 0))
 
         y_train, y_validation = labels_of(train), labels_of(validation)
         if len(set(y_train.tolist())) < 2:
             raise ValueError("Training checkpoints need both correct and incorrect answers")
 
-        best_layer, best_auroc, best_detector = None, -1.0, None
-        for layer in layers:
+        best_layer, best_auroc, best_detector, best_strength = None, -1.0, None, None
+        for layer in [layer_by_fold[test_fold]] if layer_by_fold else layers:
             hidden = hidden_at_layer(layer)
-            detector = ReadinessDetector().fit(stacked(train, hidden), y_train)
-            value = auroc(y_validation, detector.score(stacked(validation, hidden)))
-            if value > best_auroc:
-                best_layer, best_auroc, best_detector = layer, value, detector
+            x_train, x_validation = stacked(train, hidden), stacked(validation, hidden)
+            for strength in strengths:
+                detector = ReadinessDetector(strength=strength).fit(x_train, y_train)
+                value = auroc(y_validation, detector.score(x_validation))
+                if value > best_auroc:
+                    best_layer, best_auroc, best_detector, best_strength = layer, value, detector, strength
 
         hidden = hidden_at_layer(best_layer)
-        scored = lambda group: [best_detector.score(checkpoint_features(hidden, t, budget)) for t in group]
-        threshold = choose_threshold(validation, scored(validation))
+        scored = lambda group: [best_detector.score(features(hidden, t, budget)) for t in group]
+        threshold = choose_threshold(validation, scored(validation), allowed_score_drop=allowed_score_drop)
         test_scores = scored(test)
         results.append(
             {
                 "test_fold": test_fold,
                 "layer": best_layer,
+                "strength": best_strength,
                 "validation_auroc": best_auroc,
                 "threshold": threshold,
                 "test_traces": test,

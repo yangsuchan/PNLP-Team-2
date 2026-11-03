@@ -50,11 +50,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--tasks", nargs="+", default=None, help="Default: every task")
     parser.add_argument("--interval", type=int, default=256, help="Reasoning tokens between checkpoints")
     parser.add_argument("--max-samples", type=int, default=None)
+    parser.add_argument(
+        "--answer-max-tokens",
+        type=int,
+        default=1024,
+        help="Cap on one forced answer; the longest normal one seen is 641 tokens, and an answer that wanders on would cost minutes",
+    )
     args = parser.parse_args(argv)
 
     import torch
 
     config = load_inference_config(args.config, repo_root=_REPO_ROOT)
+    config.generation.max_new_tokens = args.answer_max_tokens
     if args.backend:
         config.backend = args.backend
     runner = create_runner(config)
@@ -86,14 +93,12 @@ def main(argv: list[str] | None = None) -> int:
         if not start_path.is_file():
             torch.save(torch.as_tensor(runner.extract_hidden_state(sample, [])), start_path)
 
-        for index, length in enumerate(interval_checkpoints(len(reasoning_ids), args.interval)):
-            if (sample.sample_id, index) in checkpoints_done:
-                continue
-            prefix = reasoning_ids[:length]
-            hidden = torch.as_tensor(runner.extract_hidden_state(sample, prefix))
+        lengths = interval_checkpoints(len(reasoning_ids), args.interval)
+        done = frozenset(i for i in range(len(lengths)) if (sample.sample_id, i) in checkpoints_done)
+        for index, length, states, forced in runner.checkpoints(sample, reasoning_ids, lengths, done):
+            hidden = torch.as_tensor(states)
             hidden_path = out / "hidden" / f"{sample.sample_id}_cp{index}.pt"
             torch.save(hidden, hidden_path)
-            forced = runner.forced_answer(sample, prefix_token_ids=prefix)
             _append(
                 checkpoint_table,
                 {
@@ -119,7 +124,7 @@ def main(argv: list[str] | None = None) -> int:
                     "full_tokens": len(reasoning_ids),
                     "full_answer": run["final_answer"],
                     "full_status": run["parse_status"],
-                    "budget": config.generation.max_new_tokens,
+                    "budget": run["generation_config"]["max_new_tokens"],
                     "interval": args.interval,
                     "start_hidden_path": str(start_path.relative_to(out)),
                     "metadata": sample.metadata,

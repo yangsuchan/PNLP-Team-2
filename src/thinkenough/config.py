@@ -13,7 +13,7 @@ import yaml
 class ModelConfig:
     """Base model loading settings (frozen inference only)."""
 
-    model_id: str = "Qwen/Qwen3-VL-8B-Thinking"
+    model_id: str = "Qwen/Qwen3.5-9B"
     revision: str | None = None
     dtype: str = "bfloat16"
     device_map: str = "auto"
@@ -59,10 +59,9 @@ class IOConfig:
 
 @dataclass
 class ThinkingConfig:
-    """Qwen3-VL Thinking special-token settings.
+    """Special-token settings for thinking models.
 
-    Values come from the official tokenizer_config.json for
-    Qwen/Qwen3-VL-8B-Thinking. Do not invent alternate markers.
+    The ids are fallbacks for mock runs. The real runner reads them from the model's tokenizer.
     """
 
     think_start_token_id: int = 151667

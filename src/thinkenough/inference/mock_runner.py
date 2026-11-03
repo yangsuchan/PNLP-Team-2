@@ -34,6 +34,13 @@ class MockRunner:
         result.metadata["forced_answer"] = True
         return result
 
+    def checkpoints(self, sample, token_ids, lengths, done=frozenset()):
+        """Fake counterpart of the real runner's single pass over a trace."""
+        for index, length in enumerate(lengths):
+            if index not in done:
+                prefix = token_ids[:length]
+                yield index, length, self.extract_hidden_state(sample, prefix), self.forced_answer(sample, prefix_token_ids=prefix)
+
     def extract_hidden_state(
         self, sample: InferenceSample, prefix_token_ids: list[int]
     ) -> list[list[float]]:

@@ -11,13 +11,14 @@ model:
 
 generation:
   # The budget of arXiv 2609.34809. Truncated reasoning counts as a missing answer.
+  # The sampling values are the model card's "thinking mode for general tasks".
   max_new_tokens: 6144
   do_sample: true
   temperature: 1.0
   top_p: 0.95
   top_k: 20
   repetition_penalty: 1.0
-  presence_penalty: 0.0
+  presence_penalty: 1.5
   seed: 1234
 
 io:

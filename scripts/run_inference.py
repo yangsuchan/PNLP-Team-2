@@ -61,7 +61,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--model-id",
         type=str,
         default=None,
-        help="Override config model id (e.g. Qwen/Qwen3-VL-8B-Instruct)",
+        help="Override config model id (e.g. Qwen/Qwen3.5-4B)",
+    )
+    parser.add_argument(
+        "--presence-penalty",
+        type=float,
+        default=None,
+        help="Override generation.presence_penalty, e.g. 1.5 from the model card's thinking settings",
+    )
+    parser.add_argument(
+        "--max-new-tokens",
+        type=int,
+        default=None,
+        help="Override config token budget",
     )
     parser.add_argument(
         "--revision",
@@ -108,6 +120,10 @@ def main(argv: list[str] | None = None) -> int:
         config.model.model_id = args.model_id
     if args.revision is not None:
         config.model.revision = args.revision
+    if args.max_new_tokens is not None:
+        config.generation.max_new_tokens = args.max_new_tokens
+    if args.presence_penalty is not None:
+        config.generation.presence_penalty = args.presence_penalty
 
     input_path = (
         config.resolve_path(args.input)
@@ -145,7 +161,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if config.backend == "qwen3_vl":
         print(
-            "[warn] backend=qwen3_vl will load Qwen3-VL-8B-Thinking weights. "
+            f"[warn] backend=qwen3_vl will load {config.model.model_id} weights. "
             "Ensure you are on a GPU server with enough VRAM and have approval "
             "for model download / inference.",
             file=sys.stderr,

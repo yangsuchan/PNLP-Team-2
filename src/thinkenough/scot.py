@@ -1,4 +1,4 @@
-"""SCoT Level 2-3 validation data and metrics for Qwen3-VL.
+"""SCoT Level 2-3 validation data and metrics.
 
 Questions, references, and metrics follow SCoT unchanged. Only the input differs:
 SCoT-Reasoner reads trained object features from the scan and video, while Qwen
@@ -22,7 +22,7 @@ import tempfile
 import urllib.request
 import zipfile
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 from PIL import Image, ImageDraw, ImageFont
 
@@ -44,6 +44,13 @@ VAL_FILES = {
 
 IMAGE_METERS_PER_PIXEL = 0.005  # From SCoT's utils/Eval_SCoT_LLM_Score.py.
 UNDRAWN_OBJECTS = {"ceiling", "floor", "wall"}
+# Our addition, not in SCoT: tells the model what the extra image is.
+OBJECT_MAP_NOTE = "The last image views the scene from above and marks each object with its id number."
+COLOR_WORDS = {
+    "white": "white", "brown": "brown", "black": "black", "blue": "blue", "gray": "gray",
+    "grey": "gray", "red": "red", "green": "green", "tan": "tan", "beige": "tan",
+}
+_COLOR = re.compile(r"\b(" + "|".join(COLOR_WORDS) + r")\b", re.IGNORECASE)
 MIN_ALIGNMENT_PAIRS = 5
 MAX_ALIGNMENT_ERROR = 0.1  # Meters.
 
@@ -56,11 +63,27 @@ SCENE_INSTRUCTION = (
     "The conversation centers around an indoor scene. Object information: [\n{objects}\n]."
 )
 
-_OBJECT_ID = re.compile(r"<?OBJ(\d{3})>?")
+_OBJECT_ID = re.compile(r"<?\bOBJ(\d{1,3})\b>?", re.IGNORECASE)
 _COORDINATES = re.compile(
     r"\[\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*\]"
 )
-_METERS = re.compile(r"(-?\d+(?:\.\d+)?)\s*(?:m\b|meters?\b|metres?\b)", re.IGNORECASE)
+# Between number and unit, answers may close bold or math. Coordinates have no scale, so some say "units".
+_METERS = re.compile(
+    r"(-?\d+(?:\.\d+)?)(?:\s|\*\*|\$|\\[ ,;)\]]|\\text\{|\\mathrm\{)*(?:m\b|meters?\b|metres?\b|units?\b)", re.IGNORECASE
+)
+# Words that make a number one axis of the offset rather than the distance between two points.
+_AXIS_AFTER = re.compile(
+    r"^[\s*$`\\)\]}]*(?:\w+\s)?(?:to the (?:left|right|north|south|east|west)|horizontal|vertical|lateral|along"
+    r"|in the (?:\w+[- ])?(?:x|y|z|horizontal|vertical|depth|direction)|in (?:x|y|z)\b|in depth|higher|lower|above|below"
+    r"|behind|forward|further|closer|deeper|farther|in front)",
+    re.IGNORECASE,
+)
+_AXIS_BEFORE = re.compile(
+    r"(?:\b[xyz][-_ ]?(?:axis|diff\w*|coordinate|direction)|delta|Δ|difference|horizontal|vertical|depth|elevation|height|width"
+    r"|\d\s*[-−+]\s*\d[^=\n]{0,12}=\s*[+]?)[^\n]{0,80}$",
+    re.IGNORECASE,
+)
+_WHOLE_DISTANCE = re.compile(r"(?:distance|total|overall|euclidean|apart|away)[^\n]{0,60}$", re.IGNORECASE)
 
 
 def clean_scene_id(scene_id: str) -> str:
@@ -73,7 +96,14 @@ def scene_split(scene_id: str) -> str:
     return "tune" if int(hashlib.sha1(scene_id.encode()).hexdigest(), 16) % 2 == 0 else "final"
 
 
-def scene_text(objects: list[str], locs: Any, order: list[int] | None = None) -> str:
+def question_colors(text: str) -> set[str]:
+    """Color words in a question, merging spellings. It may describe another object."""
+    return {COLOR_WORDS[word.lower()] for word in _COLOR.findall(text)}
+
+
+def scene_text(
+    objects: list[str], locs: Any, order: list[int] | None = None, colors: dict[str, str] | None = None
+) -> str:
     """Render one scene's objects with SCoT's ``<OBJ###>`` ids.
 
     One decimal matches SCoT's own scene text and keeps 150-object lists shorter.
@@ -83,25 +113,32 @@ def scene_text(objects: list[str], locs: Any, order: list[int] | None = None) ->
         locs: N x 6 values per object: center x, y, z and size x, y, z.
         order: Original object index shown at each id. SCoT also shuffles ids per
             question, so an id says nothing about the object. Default: file order.
+        colors: Optional estimated color by original object index, from
+            a separate estimate. An object without one shows none.
     """
     rows = _as_rows(locs)
     lines = []
     for shown, original in enumerate(order if order is not None else range(len(rows))):
         cx, cy, cz, sx, sy, sz = rows[original]
         name = objects[original]
+        color = (colors or {}).get(str(original))
         lines.append(
             f"<OBJ{shown:03d}> {name}: center ({cx:.1f}, {cy:.1f}, {cz:.1f}), "
-            f"size ({sx:.1f}, {sy:.1f}, {sz:.1f})"
+            f"size ({sx:.1f}, {sy:.1f}, {sz:.1f})" + (f", estimated color: {color}" if color else "")
         )
     return "\n".join(lines)
 
 
 def build_question(
-    prompt: str, objects: list[str], locs: Any, order: list[int] | None = None
+    prompt: str,
+    objects: list[str],
+    locs: Any,
+    order: list[int] | None = None,
+    colors: dict[str, str] | None = None,
 ) -> str:
-    """Put SCoT's system line and the object list before an unchanged question."""
-    scene = SCENE_INSTRUCTION.format(objects=scene_text(objects, locs, order))
-    return f"{SCOT_SYSTEM} {scene}\n\n{prompt}"
+    """Put the object list before an unchanged question. SCoT's system line goes in the system role."""
+    scene = SCENE_INSTRUCTION.format(objects=scene_text(objects, locs, order, colors))
+    return f"{scene}\n\n{prompt}"
 
 
 def make_samples(
@@ -114,18 +151,30 @@ def make_samples(
     split: str = "tune",
     image_dir: str | None = None,
     video_dir: str | None = None,
+    shuffle_ids: bool = True,
+    alignments: dict[str, dict[str, Any] | None] | None = None,
+    object_list: str = "mask3d",
+    colors: dict[str, dict[str, str]] | None = None,
+    keep: Callable[[str], bool] | None = None,
 ) -> list[InferenceSample]:
     """Sample questions from one split. The same seed gives the same questions.
 
     Args:
         task: Key of ``VAL_FILES``.
         records: Parsed SCoT validation file.
-        mask3d: Mask3D attributes by scene id.
+        mask3d: Attributes by scene id of the object list to show, Mask3D by default.
+        object_list: "mask3d" or "human"; records which list ``mask3d`` holds, for scoring.
+        colors: Optional estimated colors by scene id and original object index.
+        keep: Optional test on the question text, applied before sampling.
         per_task: Number of questions to keep.
         seed: Sampling seed.
         split: "tune" or "final" from ``scene_split``.
         image_dir: If given, attach ``<image_dir>/<scene_id>.png`` to each sample.
         video_dir: If given, attach frames in ``<video_dir>/<scene_id>/`` to each sample.
+        shuffle_ids: Shuffle object ids per question as SCoT does. False keeps file order.
+        alignments: Per-scene alignment from ``fit_scene_alignment``. When given, object
+            coordinates are written in the scan frame, and scenes without a usable
+            alignment are left out rather than given coordinates that disagree.
 
     Returns:
         Samples whose metadata holds everything scoring needs.
@@ -134,6 +183,8 @@ def make_samples(
         (index, record)
         for index, record in enumerate(records)
         if scene_split(clean_scene_id(record["scene_id"])) == split
+        and (alignments is None or alignment_is_usable(alignments.get(clean_scene_id(record["scene_id"]))))
+        and (keep is None or keep(record["prompt"]))
     ]
     chosen = sorted(
         random.Random(f"{seed}-{task}").sample(pool, min(per_task, len(pool))),
@@ -146,13 +197,21 @@ def make_samples(
         attrs = mask3d[scene_id]
         # Names can outnumber boxes in the Mask3D file; SCoT counts objects by boxes too.
         order = list(range(len(_as_rows(attrs["locs"]))))
-        random.Random(f"{seed}-{task}-{index}").shuffle(order)
+        if shuffle_ids:
+            random.Random(f"{seed}-{task}-{index}").shuffle(order)
         samples.append(
             InferenceSample(
                 sample_id=f"{task}_{index:05d}",
+                system=SCOT_SYSTEM,
                 image_path=f"{image_dir}/{scene_id}.png" if image_dir else "",
                 video_path=f"{video_dir}/{scene_id}" if video_dir else "",
-                question=build_question(record["prompt"], attrs["objects"], attrs["locs"], order),
+                question=build_question(
+                    record["prompt"],
+                    attrs["objects"],
+                    to_scan_frame(attrs["locs"], alignments[scene_id]) if alignments else attrs["locs"],
+                    order,
+                    colors[scene_id] if colors else None,
+                ),
                 metadata={
                     "task": task,
                     "split": split,
@@ -162,6 +221,9 @@ def make_samples(
                     "prompt": record["prompt"],
                     "references": record.get("ref_captions", []),
                     "object_order": order,
+                    "coordinates": "scan" if alignments else "object_list",
+                    "object_list": object_list,
+                    "estimated_colors": bool(colors),
                 },
             )
         )
@@ -310,12 +372,29 @@ def fit_scene_alignment(
     return {
         "rotation": rotation.tolist(),
         "translation": translation.tolist(),
+        "z_offset": float(np.median(boxes[known[index[matched]], 2] - human[matched, 2])),
         "x_min": float((boxes[:, 0] - boxes[:, 3]).min()),
         "y_min": float((boxes[:, 1] - boxes[:, 4]).min()),
         "pairs": int(matched.sum()),
         "human_objects": len(human),
         "median_error": float(np.median(errors)),
     }
+
+
+def to_scan_frame(locs: Any, alignment: dict[str, Any]) -> list[list[float]]:
+    """Express object boxes in the scan coordinates that SCoT's questions and images use.
+
+    The object lists are axis-aligned, while questions such as Relationship Analysis give
+    coordinates in the scan's own frame. Sizes become the box's extent along the scan's axes, so
+    they mean the same axes as the centers. A rotated box's extent is larger than the box itself.
+    """
+    import numpy as np
+
+    rows = np.array(_as_rows(locs), dtype=float)
+    rotation = np.array(alignment["rotation"])
+    centers = rows[:, :2] @ rotation.T + np.array(alignment["translation"])
+    extents = rows[:, 3:5] @ np.abs(rotation).T
+    return np.c_[centers, rows[:, 2] + alignment.get("z_offset", 0.0), extents, rows[:, 5]].tolist()
 
 
 def alignment_is_usable(alignment: dict[str, Any] | None) -> bool:
@@ -408,8 +487,20 @@ def _free_label_spot(
     return x, y  # shortcut: a very crowded spot may still overlap; rare, so accepted for now.
 
 
-def extract_frames(video_path: str | Path, out_dir: str | Path, num_frames: int = 32) -> None:
-    """Save evenly spaced JPEG frames, so model input does not depend on a video decoder.
+def frame_count(total: int, fps: float, num_frames: int | None = None, sample_fps: float = 2.0) -> int:
+    """Frames to keep: ``num_frames`` if given, else the model card's default of 2 per second.
+
+    Rounds down to even as the processor's temporal patches need, like its own sampler.
+    """
+    wanted = num_frames if num_frames else int(total / fps * sample_fps) // 2 * 2
+    return min(max(wanted, 4), total)
+
+
+def extract_frames(video_path: str | Path, out_dir: str | Path, num_frames: int | None = None) -> None:
+    """Save evenly spaced JPEG frames and their real timing in ``frames.json``.
+
+    Saving frames keeps model input independent of a video decoder. The processor needs
+    the timing, because it writes each frame's time into the prompt.
 
     Raises:
         ValueError: The video cannot be read.
@@ -418,33 +509,49 @@ def extract_frames(video_path: str | Path, out_dir: str | Path, num_frames: int 
 
     capture = cv2.VideoCapture(str(video_path))
     total = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
-    if total <= 0:
+    fps = float(capture.get(cv2.CAP_PROP_FPS))
+    if total <= 0 or fps <= 0:
         raise ValueError(f"Cannot read video: {video_path}")
     out = Path(out_dir)
     partial = out.with_name(out.name + ".partial")
     partial.mkdir(parents=True, exist_ok=True)
-    count = min(num_frames, total)
+    count = frame_count(total, fps, num_frames)
     wanted = {round(i * (total - 1) / max(count - 1, 1)) for i in range(count)}
     saved = 0
+    indices: list[int] = []
     for index in range(total):
         ok, frame = capture.read()
         if not ok:
             break
         if index in wanted:
             cv2.imwrite(str(partial / f"{saved:03d}.jpg"), frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
+            indices.append(index)
             saved += 1
     capture.release()
     if saved == 0:
         raise ValueError(f"No frames read from: {video_path}")
+    (partial / "frames.json").write_text(
+        json.dumps({"fps": fps, "total_num_frames": total, "frames_indices": indices}), encoding="utf-8"
+    )
     partial.rename(out)
 
 
-def fetch_scene_frames(scene_ids: Iterable[str], out_dir: str | Path, num_frames: int = 32) -> None:
-    """Extract frames for scenes from VSI-Bench's ScanNet videos, skipping finished scenes."""
+def fetch_scene_frames(scene_ids: Iterable[str], out_dir: str | Path, num_frames: int | None = None) -> None:
+    """Extract frames for scenes from VSI-Bench's ScanNet videos, skipping finished scenes.
+
+    Raises:
+        ValueError: A finished scene was sampled differently, so reusing it would give the wrong input.
+    """
     from huggingface_hub import hf_hub_download
 
     out = Path(out_dir)
-    wanted = [s for s in sorted(set(scene_ids)) if not (out / s).is_dir()]
+    scenes = sorted(set(scene_ids))
+    for scene_id in scenes:
+        if (out / scene_id).is_dir():
+            timing = json.loads((out / scene_id / "frames.json").read_text(encoding="utf-8"))
+            if len(timing["frames_indices"]) != frame_count(timing["total_num_frames"], timing["fps"], num_frames):
+                raise ValueError(f"{out / scene_id} holds a different frame sampling; use another --video-dir")
+    wanted = [s for s in scenes if not (out / s).is_dir()]
     if not wanted:
         return
     out.mkdir(parents=True, exist_ok=True)
@@ -490,13 +597,22 @@ def _read_drive_file(opener: Any, file_id: str) -> bytes:
         return response.read()
 
 
-def parse_object_id(answer: str, object_count: int) -> int:
-    """Return the first valid object id, or 0 when there is none, as SCoT's evaluator does."""
-    for match in _OBJECT_ID.finditer(answer):
-        object_id = int(match.group(1))
-        if object_id < object_count:
-            return object_id
-    return 0
+def parse_object_id(answer: str, object_count: int, cut_off: bool = False) -> int | None:
+    """The object an answer names, or None if there is none.
+
+    Answers that discuss several objects end with their choice, so the last line comes first. The
+    rule never looks at the correct answer. SCoT's own evaluator instead takes the first <OBJ###>,
+    but its model was trained to answer only with an id, and ours writes free text.
+
+    Args:
+        cut_off: The answer hit its token limit mid-thought, so its last line is no choice.
+    """
+    valid = lambda text: next(
+        (int(m.group(1)) for m in _OBJECT_ID.finditer(text) if int(m.group(1)) < object_count), None
+    )
+    lines = [line for line in answer.strip().split("\n") if line.strip()]
+    last = valid(lines[-1]) if len(lines) > 1 and not cut_off else None
+    return last if last is not None else valid(answer)
 
 
 def box_iou(box_a: Iterable[float], box_b: Iterable[float]) -> float:
@@ -517,13 +633,16 @@ def implicit_hit(
     target_loc: Any,
     threshold: float = 0.25,
     object_order: list[int] | None = None,
+    cut_off: bool = False,
 ) -> bool:
     """SCoT's Acc@threshold: the chosen Mask3D box overlaps the annotated target enough.
 
     object_order maps the id shown to the model back to the original object.
     """
     rows = _as_rows(mask3d_locs)
-    shown = parse_object_id(answer, len(rows))
+    shown = parse_object_id(answer, len(rows), cut_off)
+    if shown is None:
+        return False
     original = object_order[shown] if object_order is not None else shown
     return box_iou(rows[original], _as_row(target_loc)) >= threshold
 
@@ -653,16 +772,60 @@ def is_correct(
     human: dict[str, dict[str, Any]],
     *,
     distance_tolerance: float = 0.2,
+    cut_off: bool = False,
 ) -> bool | None:
     """Program-graded correctness. None for tasks that need a text metric or a judge."""
     if meta["task"] == "implicit_detection":
         target = _as_rows(human[meta["scene_id"]]["locs"])[int(meta["obj_id"])]
-        locs = mask3d[meta["scene_id"]]["locs"]
-        return implicit_hit(answer, locs, target, 0.25, meta.get("object_order"))
-    if meta["task"] == "relationship_analysis":
-        error = distance_error(answer, meta["prompt"])
-        return error is not None and error <= distance_tolerance
+        locs = _shown_objects(meta, mask3d, human)["locs"]
+        return implicit_hit(answer, locs, target, 0.25, meta.get("object_order"), cut_off)
+    if meta["task"] == "relationship_analysis" and asks_distance(meta["prompt"]):
+        stated, truth = stated_distance(answer), true_distance(meta["prompt"])
+        return stated is not None and truth is not None and abs(stated - truth) <= distance_tolerance
     return None
+
+
+def _is_axis_offset(text: str, match: re.Match) -> bool:
+    """Whether a number is one axis of the offset, like "0.5 meters to the right", not the distance."""
+    if _AXIS_AFTER.search(text[match.end() : match.end() + 30]):
+        return True
+    before = text[text.rfind("\n", 0, match.start()) + 1 : match.start()]
+    return not _WHOLE_DISTANCE.search(before) and bool(_AXIS_BEFORE.search(before))
+
+
+def stated_distance(answer: str) -> float | None:
+    """The first distance an answer gives, ignoring quoted coordinates and offsets along one axis.
+
+    A lone offset counts, since it is the only distance the answer states. Stricter than
+    ``distance_error``, which takes whichever number is closest to the truth.
+    """
+    # Math delimiters go first, or removing brackets would remove whole equations.
+    text = re.sub(r"\[[^\]]*\]|\([^)]*\)", "", re.sub(r"\\[()\[\]]", " ", answer))
+    found = list(_METERS.finditer(text))
+    whole = [m for m in found if not _is_axis_offset(text, m)]
+    if whole:
+        return float(whole[0].group(1))
+    return float(found[0].group(1)) if len(found) == 1 else None
+
+
+def parse_answer_key(answer: str, meta: dict[str, Any], cut_off: bool = False) -> Any:
+    """An answer in comparable form: the object id, or the distance to one decimal. None if absent."""
+    if meta["task"] == "implicit_detection":
+        return parse_object_id(answer, 1000, cut_off)
+    distance = stated_distance(answer)
+    return round(distance, 1) if distance is not None else None
+
+
+def asks_distance(prompt: str) -> bool:
+    """Only these Relationship questions can fairly be graded on a stated distance."""
+    return "distance" in prompt.lower()
+
+
+def _shown_objects(
+    meta: dict[str, Any], mask3d: dict[str, dict[str, Any]], human: dict[str, dict[str, Any]]
+) -> dict[str, Any]:
+    """The object list this question showed the model."""
+    return (human if meta.get("object_list") == "human" else mask3d)[meta["scene_id"]]
 
 
 def _has_no_think_channel(arm: str) -> bool:
@@ -722,7 +885,7 @@ def summarize_arm(
             chance = []
             for row in group:
                 meta = row["metadata"]
-                locs = mask3d[meta["scene_id"]]["locs"]
+                locs = _shown_objects(meta, mask3d, human)["locs"]
                 target = _as_rows(human[meta["scene_id"]]["locs"])[int(meta["obj_id"])]
                 order = meta.get("object_order")
                 hits.append(implicit_hit(answer_text(row, arm), locs, target, 0.25, order))
@@ -733,11 +896,15 @@ def summarize_arm(
             summary["acc_at_025_random"] = sum(chance) / len(chance)
         if task == "relationship_analysis":
             errors = [
-                distance_error(answer_text(row, arm), row["metadata"]["prompt"]) for row in group
+                distance_error(answer_text(row, arm), row["metadata"]["prompt"])
+                for row in group
+                if asks_distance(row["metadata"]["prompt"])
             ]
-            summary["distance_ok_rate"] = sum(
-                error is not None and error <= distance_tolerance for error in errors
-            ) / len(errors)
+            summary["distance_questions"] = len(errors)
+            if errors:
+                summary["distance_ok_rate"] = sum(
+                    error is not None and error <= distance_tolerance for error in errors
+                ) / len(errors)
         table.append(summary)
     return table
 

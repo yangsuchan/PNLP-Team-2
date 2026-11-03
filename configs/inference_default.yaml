@@ -4,17 +4,15 @@
 backend: mock
 
 model:
-  model_id: Qwen/Qwen3-VL-8B-Thinking
-  revision: null
+  model_id: Qwen/Qwen3.5-9B
+  revision: c202236235762e1c871ad0ccb60c8ee5ba337b9a
   # BF16 is the official weight dtype; do not change casually.
   dtype: bfloat16
   device_map: auto
   # Optional: flash_attention_2 on GPU servers that support it.
   attn_implementation: null
 
-# VL Thinking defaults from the Hugging Face model card for
-# Qwen3-VL-8B-Thinking. Mintlify docs also list temperature=0.6;
-# keep the model-card values here and override in experiment configs.
+# Mock defaults only. configs/pilot.yaml holds the settings of the experiments.
 generation:
   max_new_tokens: 40960
   do_sample: true
@@ -31,7 +29,7 @@ io:
   # Relative paths are resolved from the repository root.
   input_jsonl: data/samples/example_inputs.jsonl
 
-# Qwen3-VL Thinking special token IDs (tokenizer_config.json).
+# Fallback token ids for mock runs; the real runner reads them from the tokenizer.
 # THINK_START is usually already in the prompt for Thinking models.
 thinking:
   think_start_token_id: 151667
